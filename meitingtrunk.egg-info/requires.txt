@@ -1,4 +1,4 @@
-PyQt5
+PyQt5>=5.12
 pdfminer.six
 pypdf2
 beautifulsoup4
@@ -6,3 +6,6 @@ fuzzywuzzy
 bibtexparser
 crossrefapi
 RISparser
+send2trash
+python-levenshtein
+PyQtWebEngine

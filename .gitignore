@@ -1,5 +1,9 @@
 *.pyc
+*.swp
 *.log
+*.log.*
 *.ini
 /dist/
 /build/
+/samples/
+.vscode

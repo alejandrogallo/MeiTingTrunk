@@ -18,18 +18,16 @@ import os
 import shutil
 import time
 import re
+import multiprocessing
+from urllib.parse import quote
 from datetime import datetime
 import sqlite3
 import logging
+from send2trash import send2trash
 from collections import MutableMapping
-try:
-    from . import bibparse
-except:
-    import bibparse
-try:
-    from .tools import autoRename
-except:
-    from tools import autoRename
+from .tools import autoRename, isXapianReady, parseAuthors, delThumbnails
+if isXapianReady():
+    from . import xapiandb
 
 DOC_ATTRS=[\
 'issn', 'issue', 'language', 'read', 'type', 'confirmed',
@@ -613,19 +611,15 @@ def fetchMetaData(meta_dict, key, docids, unique, sort):
     return result
 
 
-def filterDocs(meta_dict, folder_data, filter_type, filter_text,
-        current_folder):
+def filterDocs(meta_dict, docids, filter_type, filter_text):
     """Filter docs using a given filter text
 
     Args:
         meta_dict (dict): meta data of all documents. keys: docid,
             values: DocMeta dict.
-        folder_data (dict): documents in each folder. keys: folder id in str,
-            values: list of doc ids.
+        docids (list): list of int doc ids to perform filter.
         filter_type (str): defines the field of the filter_text.
         filter_text (str): filtering text.
-        current_folder (str): id of folder. Docs are selected from docs in
-                              this folder.
 
     Returns: results (list): ids of docs within folder given by
              <current_folder>, containing the text <filter_text> in the field
@@ -633,10 +627,6 @@ def filterDocs(meta_dict, folder_data, filter_type, filter_text,
     """
 
     results=[]
-    if current_folder=='-1':
-        docids=meta_dict.keys()
-    else:
-        docids=folder_data[current_folder]
 
     if filter_type=='Filter by authors':
         t_last,t_first=map(str.strip,filter_text.split(','))
@@ -662,7 +652,6 @@ def filterDocs(meta_dict, folder_data, filter_type, filter_text,
             keywords=meta_dict[kk]['keywords_l'] or []
             if filter_text in keywords:
                 results.append(kk)
-
 
     return results
 
@@ -756,6 +745,8 @@ def renameFile(fname, meta_dict, replace_space=False):
         author=author[0]
         if author is None or author=='':
             author='Unknown'
+        else:
+            author=author.strip()
     else:
         author='Unknown'
 
@@ -763,9 +754,12 @@ def renameFile(fname, meta_dict, replace_space=False):
     year=meta_dict['year']
     if year is None:
         year='unknown'
+    else:
+        year=str(year).strip()
 
     # get title
-    title=meta_dict.get('title',basename)
+    title=meta_dict['title'] or basename
+    title=title.strip()
 
     LOGGER.debug('author = %s, year = %s, title = %s' %(author,year,title))
 
@@ -789,15 +783,14 @@ def renameFile(fname, meta_dict, replace_space=False):
     if replace_space:
         fname2=fname2.replace(' ','-')
 
-    fname2=re.sub(r'[<>:"|?*]','_',fname2)
+    fname2=re.sub(r'[<>:"|/\?*]','_',fname2)
 
     LOGGER.info('Old filename = %s. New filename = %s' %(fname,fname2))
 
     return fname2
 
 
-def saveFoldersToDatabase(db, folder_ids, folder_dict, folder_data,
-        lib_folder):
+def saveFoldersToDatabase(db, folder_ids, folder_dict, lib_folder):
     """Save folder changes to sqlite
 
     Args:
@@ -805,8 +798,6 @@ def saveFoldersToDatabase(db, folder_ids, folder_dict, folder_data,
         folder_ids (list): list of ids (in str) of folders to save.
         folder_dict (dict): folder structure info. keys: folder id in str,
             values: (foldername, parentid) tuple.
-        folder_data (dict): documents in each folder. keys: folder id in str,
-            values: list of doc ids.
         lib_folder (str): abspath to the folder of the library. By design
                           this should point to the folder CONTAINING the
                           sqlite database file.
@@ -1014,19 +1005,28 @@ def createNewDatabase(file_path):
     return dbout, dirname, lib_name
 
 
-def metaDictToDatabase(db, docid, meta_dict, lib_folder, rename_files):
+def metaDictToDatabase(db, docid, meta_dict_all, meta_dict, lib_folder,
+        rename_files, add_manner):
     """Save document changes to sqlite
 
     Args:
         db (sqlite connection): sqlite connection.
         docid (int): id of doc to save changes.
+        meta_dict_all (dict): meta data of all documents. keys: docid,
+            values: DocMeta dict.
         meta_dict (DocMeta): meta data dict.
         lib_folder (str): abspath to the folder of the library. By design
                           this should point to the folder CONTAINING the
                           sqlite database file.
-        rename_files (bool): whether to rename attachment files when saving.
+        rename_files (int): 1 for renaming attachment files when saving, 0
+                            for using original file name.
+        add_manner (int): file adding manner. If 'copy', copy added attachment
+                          into lib_folder/_collections/. If 'link', create
+                          symbolic link.
 
     Returns: rec (int): 0 if success, None otherwise.
+             reload_doc (bool): if True, call loadDocTable() to refresh changes
+                                in the 'files_l' field later.
 
     3 types of changes are handled in this function:
         * insertion: <docid> is not found in sqlite, addToDatabase() is called.
@@ -1042,25 +1042,41 @@ def metaDictToDatabase(db, docid, meta_dict, lib_folder, rename_files):
     docids=db.execute(query).fetchall()
     docids=[ii[0] for ii in docids]
 
+    LOGGER.debug('rename_files = %s' %rename_files)
+
     if docid in docids:
 
         if meta_dict is None:
             LOGGER.info('docid %s in database. New meta=None. Deleting...' %docid)
             rec=delDocFromDatabase(db,docid,lib_folder)
+            reload_doc=False
         else:
             LOGGER.info('docid %s in database. Updating...' %docid)
-            rec=updateToDatabase(db,docid,meta_dict,lib_folder,rename_files)
+            rec,reload_doc=updateToDatabase(db, docid, meta_dict, lib_folder,
+                    rename_files, add_manner)
     else:
         if meta_dict is None:
             LOGGER.info('docid %s not in database. New meta=None. Ignore.' %docid)
             rec=0
         else:
             LOGGER.info('docid %s not in database. Inserting...' %docid)
-            rec=addToDatabase(db,docid,meta_dict,lib_folder,rename_files)
+            rec,reload_doc=addToDatabase(db, docid, meta_dict, lib_folder,
+                    rename_files, add_manner)
 
-    LOGGER.info('Done updating doc to database.')
+    if reload_doc:
+        meta_dict_all[docid]=getMetaData(db,docid)
 
-    return rec
+    #----------------Call xapian index----------------
+    xapian_folder=os.path.join(lib_folder,'_xapian_db')
+    if isXapianReady() and os.path.exists(xapian_folder):
+        proc=multiprocessing.Process(target=xapiandb.indexFolder, args=(
+            xapian_folder, lib_folder), daemon=False)
+        LOGGER.debug('Start indexing process')
+        proc.start()
+
+    LOGGER.info('Done updating doc to database. Need to reload_doc = %s' %reload_doc)
+
+    return rec, reload_doc
 
 
 def insertToDocuments(db, docid, meta_dict, action):
@@ -1150,7 +1166,8 @@ def delFromTable(db, table, docid):
     return 0
 
 
-def insertToDocumentFiles(db, docid, meta_dict, lib_folder, rename_files):
+def insertToDocumentFiles(db, docid, meta_dict, lib_folder, rename_files,
+        add_manner):
     """Insert or update columns in the DocumentsFiles table
 
     Args:
@@ -1160,7 +1177,11 @@ def insertToDocumentFiles(db, docid, meta_dict, lib_folder, rename_files):
         lib_folder (str): abspath to the folder of the library. By design
                           this should point to the folder CONTAINING the
                           sqlite database file.
-        rename_files (bool): whether to rename attachment files when saving.
+        rename_files (int): 1 for renaming attachment files when saving, 0
+                            for using original file name.
+        add_manner (int): file adding manner. If 'copy', copy added attachment
+                          into lib_folder/_collections/. If 'link', create
+                          symbolic link.
 
     Returns: 0
 
@@ -1177,70 +1198,109 @@ def insertToDocumentFiles(db, docid, meta_dict, lib_folder, rename_files):
 
     abs_file_folder=os.path.join(lib_folder,'_collections')
     rel_file_folder=os.path.join('','_collections')
+    rename_files=int(rename_files) # make sure this int, not str
     LOGGER.debug('lib_name = %s' %lib_name)
     LOGGER.debug('abs_file_folder = %s' %abs_file_folder)
     LOGGER.debug('rel_file_folder = %s' %rel_file_folder)
+    LOGGER.debug('rename_files = %s' %rename_files)
 
     if not os.path.exists(abs_file_folder):
         os.makedirs(abs_file_folder)
 
     files=meta_dict['files_l']
+    files_updated=[]
     if len(files)>0:
         query='''INSERT OR IGNORE INTO DocumentFiles (did, relpath)
         VALUES (?,?)'''
 
+        LOGGER.debug('files_l=%s' %files)
         for fii in files:
-            fii=os.path.expanduser(fii)
-            fii=os.path.abspath(fii)
+            LOGGER.debug('fii=%s' %fii)
 
-            if rename_files:
-                filename=renameFile(fii,meta_dict)
+            # this is a newly added file, therefore it's abs
+            if os.path.isabs(fii):
+                new_file=True
+                # check new file is in the same lib
+                #common=os.path.commonprefix([abs_file_folder,fii])
+                dirname=os.path.dirname(fii)
+                if dirname==abs_file_folder:
+                    LOGGER.warning('Adding a file from within lib: %s'\
+                            %fii)
+
+            # this file is already added to lib, therefore it's rel
             else:
-                filename=os.path.split(fii)[1]
+                new_file=False
 
-            #absii=tools.removeInvalidPathChar(absii)
-            #folder,filename=os.path.split(absii)
-            # can't do filename change here, will cause missing file.
-            #filename=re.sub(r'[<>:"|?*]','_',filename)
-            #if rename_files:
-                #filename=renameFile(fii,meta_dict)
-            #newabsii=os.path.join(lib_folder,'_collections')
-            newabsii=os.path.join(abs_file_folder,filename)
+            #--------------Compose new file name--------------
+            if rename_files:
+                newfilename=renameFile(fii,meta_dict)
+            else:
+                newfilename=os.path.split(fii)[1]
+                newfilename=re.sub(r'[<>:"|/\?*]','_',newfilename)
 
-            # deal with name conflicts
-            newabsii=autoRename(newabsii)
-            filename=os.path.split(newabsii)[1]
+            newabsii=os.path.join(abs_file_folder,newfilename)
 
-            rel_fii=os.path.join(rel_file_folder,filename)
+            if new_file:
+                # deal with name conflicts
+                newabsii=autoRename(newabsii)
+                newfilename=os.path.split(newabsii)[1]
+                oldabsii=fii
+            else:
+                # deal with name conflicts?
+                newabsii=autoRename(newabsii)
+                newfilename=os.path.split(newabsii)[1]
+                oldfilename=os.path.split(fii)[1]
+                oldabsii=os.path.join(abs_file_folder,oldfilename)
+
+            rel_fii=os.path.join(rel_file_folder,newfilename)
             cout.execute(query,(docid,rel_fii))
+
+            files_updated.append(rel_fii)
 
             LOGGER.debug('new abspath = %s' %newabsii)
             LOGGER.debug('new relpath = %s' %rel_fii)
 
-            #if not os.path.exists(newabsii):
-            # check if fii is abspath or relpath
-            if os.path.isabs(fii):
+            #------------Copy or link or move file------------
+            if new_file:
                 try:
-                    shutil.copy(fii,newabsii)
-                    LOGGER.info('copy file %s -> %s' %(fii,newabsii))
+                    if add_manner=='copy':
+                        shutil.copy(oldabsii,newabsii)
+                    elif add_manner=='link':
+                        os.symlink(oldabsii,newabsii)
+                    LOGGER.info('%s file %s -> %s' %(add_manner,oldabsii,newabsii))
                 except:
-                    LOGGER.exception('Failed to copy file %s to %s' %(fii,newabsii))
+                    LOGGER.exception('Failed to %s file %s to %s'\
+                            %(add_manner,oldabsii,newabsii))
+            else:
+                try:
+                    shutil.move(oldabsii,newabsii)
+                    LOGGER.info('move file %s -> %s' %(oldabsii,newabsii))
+                except:
+                    LOGGER.exception('Failed to move file %s to %s'\
+                            %(oldabsii,newabsii))
 
-            #--------------------Copy file--------------------
-            #try:
-                #shutil.copy(fii, newabsii)
-                #LOGGER.debug('Copied file %s to %s' %(absii,newabsii))
-            #except:
-                #LOGGER.exception('Failed to copy file %s to %s' %(absii,newabsii))
+            '''
+            #-----------------Update to xapian-----------------
+            if isXapianReady():
+                try:
+                    rec=xapiandb.indexFile(abs_xapian_folder, newabsii, rel_fii,
+                            meta_dict)
+                    if rec==1:
+                        LOGGER.error('Failed to index attachment %s' %fii)
+                except:
+                    LOGGER.exception('Failed to index attachment %s' %fii)
+            '''
 
         db.commit()
 
+    # update meta_dict
+    meta_dict['files_l']=files_updated
     LOGGER.info('Done inserting doc %s to DocumentFiles' %docid)
 
     return 0
 
 
-def addToDatabase(db, docid, meta_dict, lib_folder, rename_files):
+def addToDatabase(db, docid, meta_dict, lib_folder, rename_files, add_manner):
     """Add new document to sqlite
 
     Args:
@@ -1250,9 +1310,15 @@ def addToDatabase(db, docid, meta_dict, lib_folder, rename_files):
         lib_folder (str): abspath to the folder of the library. By design
                           this should point to the folder CONTAINING the
                           sqlite database file.
-        rename_files (bool): whether to rename attachment files when saving.
+        rename_files (int): 1 for renaming attachment files when saving, 0
+                            for using original file name.
+        add_manner (int): file adding manner. If 'copy', copy added attachment
+                          into lib_folder/_collections/. If 'link', create
+                          symbolic link.
 
     Returns: rec (int): 0 if success, None otherwise.
+             reload_doc (bool): if True, call loadDocTable() to refresh changes
+                                in the 'files_l' field later.
     """
 
     LOGGER.info('Adding doc to database. docid = %s' %docid)
@@ -1275,8 +1341,13 @@ def addToDatabase(db, docid, meta_dict, lib_folder, rename_files):
         LOGGER.debug('rec of insertToDocumentAuthors = %s' %rec)
 
     #-------------------Update files-------------------
-    rec=insertToDocumentFiles(db, docid, meta_dict, lib_folder, rename_files)
-    LOGGER.debug('rec of insertToDocumentFiles = %s' %rec)
+    if len(meta_dict['files_l'])>0:
+        rec=insertToDocumentFiles(db, docid, meta_dict, lib_folder,
+                rename_files, add_manner)
+        LOGGER.debug('rec of insertToDocumentFiles = %s' %rec)
+        reload_doc=True
+    else:
+        reload_doc=False
 
     #------------------Update folder------------------
     rec=insertToTable(db, 'DocumentFolders',
@@ -1314,10 +1385,11 @@ def addToDatabase(db, docid, meta_dict, lib_folder, rename_files):
 
     LOGGER.info('Done adding doc to database.')
 
-    return 0
+    return 0, reload_doc
 
 
-def updateToDatabase(db, docid, meta_dict, lib_folder, rename_files):
+def updateToDatabase(db, docid, meta_dict, lib_folder, rename_files,
+        add_manner):
     """Save changes of existing document to sqlite
 
     Args:
@@ -1327,9 +1399,15 @@ def updateToDatabase(db, docid, meta_dict, lib_folder, rename_files):
         lib_folder (str): abspath to the folder of the library. By design
                           this should point to the folder CONTAINING the
                           sqlite database file.
-        rename_files (bool): whether to rename attachment files when saving.
+        rename_files (int): 1 for renaming attachment files when saving, 0
+                            for using original file name.
+        add_manner (int): file adding manner. If 'copy', copy added attachment
+                          into lib_folder/_collections/. If 'link', create
+                          symbolic link.
 
     Returns: rec (int): 0 if success, None otherwise.
+             reload_doc (bool): if True, call loadDocTable() to refresh changes
+                                in the 'files_l' field later.
     """
 
     cout=db.cursor()
@@ -1395,8 +1473,41 @@ def updateToDatabase(db, docid, meta_dict, lib_folder, rename_files):
 
         LOGGER.debug('Need to update files.')
         delFromTable(db, 'DocumentFiles', docid)
-        rec=insertToDocumentFiles(db, docid, meta_dict, lib_folder, rename_files)
+        rec=insertToDocumentFiles(db, docid, meta_dict, lib_folder,
+                rename_files, add_manner)
         LOGGER.debug('rec of insertToDocumentFiles=%s' %rec)
+
+        # any old file to del?
+        del_files=list(set(old_meta['files_l']).difference(set(meta_dict['files_l'])))
+        if len(del_files)>0:
+            xapian_folder=os.path.join(lib_folder,'_xapian_db')
+            LOGGER.info('Deleting old files: %s' %del_files)
+            for fii in del_files:
+                # del thumbnail if exists:
+                delThumbnails(lib_folder, os.path.split(fii)[1])
+
+                # del from xapian
+                if isXapianReady() and os.path.exists(xapian_folder):
+                    try:
+                        urlii='U/%s' %quote(fii)
+                        #print('# <updateToDatabase>: urlii=',urlii)
+                        rec=xapiandb.delXapianDoc(xapian_folder, urlii)
+                        if rec==1:
+                            LOGGER.error('Failed to delete from xapian.')
+                    except:
+                        LOGGER.exception('Failed to delete from xapian.')
+
+                absii=os.path.join(lib_folder,fii)
+                if os.path.exists(absii):
+                    LOGGER.info('Deleting file from disk %s' %absii)
+                    #os.remove(absii)
+                    send2trash(absii)
+                    #NOTE that files deleted by send2trash seems to be
+                    # unable to restore, at least in linux
+
+        reload_doc=True
+    else:
+        reload_doc=False
 
     #-----------------Update keywords-----------------
     if set(old_meta['keywords_l']) != set(meta_dict['keywords_l']):
@@ -1461,7 +1572,7 @@ def updateToDatabase(db, docid, meta_dict, lib_folder, rename_files):
 
     LOGGER.info('Done updating doc to database.')
 
-    return 0
+    return 0, reload_doc
 
 
 def delDocFromDatabase(db, docid, lib_folder):
@@ -1500,12 +1611,25 @@ def delDocFromDatabase(db, docid, lib_folder):
     old_files=fetchField(db, query_files, (docid,), 1, 'list')
     delFromTable(db, 'DocumentFiles', docid)
 
-    for fii in old_files:
+    #-----------------Del from xapian-----------------
+    xapian_folder=os.path.join(lib_folder,'_xapian_db')
+    sqlitepath=db.execute('PRAgMA database_list').fetchall()[0][2]
+    if isXapianReady() and os.path.exists(xapian_folder):
+        try:
+            xapiandb.delByDocid2(xapian_folder, sqlitepath, docid)
+        except:
+            LOGGER.exception('Failed to delete from xapian.')
+
+    for ii, fii in enumerate(old_files):
+        # del thumbnail if exists:
+        delThumbnails(lib_folder, os.path.split(fii)[1])
+
         # prepend folder path
         absii=os.path.join(lib_folder,fii)
         if os.path.exists(absii):
             LOGGER.info('Deleting file from disk %s' %absii)
-            os.remove(absii)
+            #os.remove(absii)
+            send2trash(absii)
 
     #-----------------del keywords-----------------
     delFromTable(db, 'DocumentKeywords', docid)
@@ -1522,3 +1646,67 @@ def delDocFromDatabase(db, docid, lib_folder):
     LOGGER.info('Done deleting doc from database.')
 
     return 0
+
+
+def replaceTerm(db, field, old_terms, new_term):
+    '''Replace terms
+
+    Args:
+        db (sqlite connection): sqlite connection.
+        field (str): field of replacement, one of 'Authors', 'Journals',
+                     'Keywords', 'Tags'.
+        old_terms (list): list of terms to replace.
+        new_term (str): new term to use.
+    '''
+
+    LOGGER.debug('new_term = %s' %new_term)
+    LOGGER.debug('old_terms = %s' %old_terms)
+
+    if field=='Authors':
+        firstnames, lastnames, authors=parseAuthors(old_terms)
+        newf, newlast, newauthor=parseAuthors([new_term,])
+        newf=newf[0]
+        newlast=newlast[0]
+
+        LOGGER.debug('firstnames = %s' %firstnames)
+        LOGGER.debug('lastnames = %s' %lastnames)
+        LOGGER.debug('new firstname = %s' %newf)
+        LOGGER.debug('new lastnames = %s' %newlast)
+
+        query='''UPDATE DocumentContributors SET
+        firstNames = ?,
+        lastName = ?
+        WHERE (firstNames = ? AND lastName = ?)
+        '''
+
+        for fii, lii in zip(firstnames, lastnames):
+            if fii==newf and lii==newlast:
+                continue
+            LOGGER.debug('Updating %s %s' %(fii, lii))
+            db.execute(query, (newf, newlast, fii, lii))
+    else:
+        if field=='Journals':
+            table_name='Documents'
+            column_name='publication'
+        elif field=='Keywords':
+            table_name='DocumentKeywords'
+            column_name='text'
+        elif field=='Tags':
+            table_name='DocumentTags'
+            column_name='tag'
+
+        query='''UPDATE %s SET
+        %s = ?
+        WHERE %s = ?
+        ''' %(table_name, column_name, column_name)
+
+        for ii in old_terms:
+            if ii==new_term:
+                continue
+            db.execute(query, (new_term, ii))
+
+    db.commit()
+
+    return
+
+

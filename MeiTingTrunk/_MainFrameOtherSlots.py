@@ -14,7 +14,12 @@ You may use, distribute and modify this code under the
 terms of the GPLv3 license.
 '''
 
-from PyQt5.QtCore import Qt, pyqtSignal, pyqtSlot, QThread
+import os
+import glob
+import resource
+import subprocess
+from PyQt5.QtCore import Qt, pyqtSignal, pyqtSlot, QThread, QTimer
+from .lib.tools import hasPoppler
 
 
 class SettingsThread(QThread):
@@ -258,9 +263,9 @@ class MainFrameOtherSlots:
 
                 # TODO: keep a record of previous sortidx?
                 if folder=='All' and folderid=='-1':
-                    self.loadDocTable(None,sortidx=4,sel_row=0)
+                    self.loadDocTable(None,sortidx=None,sel_row=0)
                 else:
-                    self.loadDocTable((folder,folderid),sortidx=4,sel_row=0)
+                    self.loadDocTable((folder,folderid),sortidx=None,sel_row=0)
                 #self.doc_table.selectRow(0)
 
         return
@@ -290,9 +295,9 @@ class MainFrameOtherSlots:
 
                 # TODO: keep a record of previous sortidx?
                 if folder=='All' and folderid=='-1':
-                    self.loadDocTable(None,sortidx=4,sel_row=0)
+                    self.loadDocTable(None,sortidx=None,sel_row=0)
                 else:
-                    self.loadDocTable((folder,folderid),sortidx=4,sel_row=0)
+                    self.loadDocTable((folder,folderid),sortidx=None,sel_row=0)
                 #self.doc_table.selectRow(0)
 
         return
@@ -315,6 +320,14 @@ class MainFrameOtherSlots:
         '''
 
         self.clearMetaTab()
+        # hide duplicate frame and search frame.
+        if self.duplicate_result_frame.isVisible():
+            self.duplicate_result_frame.setVisible(False)
+        if self.search_res_frame.isVisible():
+            self.search_res_frame.setVisible(False)
+        if not self.doc_table.isVisible():
+            self.doc_table.setVisible(True)
+
         self.doc_table.model().arraydata=[]
         self.doc_table.model().layoutChanged.emit()
         self.libtree.clear()
@@ -327,3 +340,82 @@ class MainFrameOtherSlots:
         self.logger.info('Data cleared.')
 
         return
+
+
+    def createThumbnails(self):
+        '''Create PDF thumbnails in the background.
+
+        This is supposed to run in a separate thread when a library is opened,
+        and stopped when a library is closed. See
+
+        _MainWindow._openDatabase()
+        _MainWindow.closeDatabaseTriggered()
+        '''
+
+        if not hasPoppler():
+            return
+
+        lib_folder=self.settings.value('saving/current_lib_folder', type=str)
+        cache_folder=os.path.join(lib_folder, '_cache')
+        file_folder=os.path.join(lib_folder, '_collections')
+        dpi=self.settings.value('view/thumbnail_dpi', type=str)
+
+        files=os.listdir(file_folder)
+
+        def setlimits():
+            # Set maximum CPU time to n second in child process,
+            # after fork() but before exec()
+            #print("Setting resource limit in child (pid %d)" % os.getpid())
+            resource.setrlimit(resource.RLIMIT_CPU, (0.2, 0.3))
+
+        def _createTN():
+
+            if len(files)==0:
+                return
+
+            fii=files.pop()
+
+            #-----------Try finding saved thumbnail-----------
+            glob_paths=os.path.join(cache_folder, '%s-%s*.jpg' %(fii, dpi))
+            outfiles=glob.glob(glob_paths)
+            if len(outfiles)>0:
+                # if exists, call itself after short delay
+                QTimer.singleShot(5, lambda : _createTN())
+                return
+
+            pii=os.path.join(file_folder, fii)
+            outfileii=os.path.join(cache_folder, '%s-%s' %(fii, dpi))
+            cmd=['pdftoppm', pii, outfileii, '-jpeg', '-r', dpi]
+
+            try:
+                proc=subprocess.Popen(cmd, stdout=subprocess.PIPE,
+                    stderr=subprocess.PIPE)
+                    #preexec_fn=setlimits)
+                proc.wait()
+            except Exception as e:
+                self.logger.exception('e = %s' %e)
+                # if fail, call itself after short delay
+                QTimer.singleShot(5, lambda : _createTN())
+                return
+            else:
+                self.logger.debug('Generated a new thumbnail for %s' %fii)
+                # if success, call itself after longer delay
+                QTimer.singleShot(4000, lambda : _createTN())
+                return
+
+        # stop on lib closing
+        if not self.parent.is_loaded:
+            return
+
+        # the setlimits() doesn't seem to be enough, this is taking
+        # too much resource and then fan goes crazy.
+        # Can't use sleep which will block
+        QTimer.singleShot(5, lambda : _createTN())
+
+        return
+
+
+
+
+
+

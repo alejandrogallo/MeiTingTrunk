@@ -113,6 +113,7 @@ class PreferenceDialog(QtWidgets.QDialog):
         LOGGER.info('Changes: %s' %self.new_values)
 
         for kk,vv in self.new_values.items():
+
             self.settings.setValue(kk,vv)
 
         #------------------Set new timer------------------
@@ -129,6 +130,7 @@ class PreferenceDialog(QtWidgets.QDialog):
             os.makedirs(storage_folder)
 
             LOGGER.info('Create new storage folder %s' %storage_folder)
+
 
         # TODO: apply change to database and meta_dict
         # need to call saveFoldersToDatabase() with new folder, and
@@ -293,16 +295,11 @@ class PreferenceDialog(QtWidgets.QDialog):
     def loadSavingsOptions(self):
         '''Load widgets for the Savings category'''
 
-        scroll, va=self.createFrame('Rename Files')
+        scroll, va=self.createFrame('Default saving folder')
 
         #-------------Choose storage folder section-------------
-        # NOTE: too much trouble dealing the folder path changes. Not now
-        """
         label2=QtWidgets.QLabel('''
-        Select folder to save document files. <br/>
-        &nbsp;&nbsp; Document (e.g. PDFs) will be copied to the
-        <span style="font:bold;">
-        "Collections" </span> <br/> &nbsp;&nbsp; sub-folder of the chosen folder.
+        Select default folder to save libraries
         ''')
         label2.setTextFormat(Qt.RichText)
         va.addWidget(label2)
@@ -319,12 +316,27 @@ class PreferenceDialog(QtWidgets.QDialog):
         button=QtWidgets.QPushButton(self)
         button.setText('Choose')
 
-        button.clicked.connect(self.chooseSaveFolder)
+        button.clicked.connect(lambda x,le=le:self.chooseSaveFolder(le))
         ha.addWidget(button)
         va.addWidget(getHLine())
-        """
+
+        #---------------Link or copy section---------------
+        label1=QtWidgets.QLabel('Choose saving manner')
+        label1.setStyleSheet(self.label_color)
+        label1.setFont(self.title_label_font)
+        self.saving_manner_radiogroup=self.createSavingMannerGroup()
+        label4=QtWidgets.QLabel('NOTE that changes would only affect files added in the future')
+        label4.setWordWrap(True)
+
+        va.addWidget(label1)
+        va.addWidget(self.saving_manner_radiogroup)
+        va.addWidget(label4)
+        va.addWidget(getHLine())
 
         #---------------Rename file section---------------
+        label3=QtWidgets.QLabel('Rename Files')
+        label3.setStyleSheet(self.label_color)
+        label3.setFont(self.title_label_font)
         checkbox=QtWidgets.QCheckBox('Rename Files')
         checked=self.settings.value('saving/rename_files',type=int)
         LOGGER.debug('Is rename files = %s' %checked)
@@ -339,12 +351,14 @@ class PreferenceDialog(QtWidgets.QDialog):
 
         le.setText('Renaming Format: Author_Year_Title.pdf')
 
+        current_lib=self.settings.value('saving/current_lib_folder', type=str)
         label2=QtWidgets.QLabel('''
-        Documents (e.g. PDFs) will be copied to the
+        Documents (e.g. PDFs) will be copied/linked to the
         <span style="font:bold;">
         "%s/_collections" </span>
         folder, and renamed by the following format.
-        ''' %(self.settings.value('saving/current_lib_folder')))
+        ''' %('library-name' if current_lib=='' else current_lib)
+        )
         label2.setTextFormat(Qt.RichText)
         label2.setWordWrap(True)
 
@@ -360,8 +374,8 @@ class PreferenceDialog(QtWidgets.QDialog):
         va.addWidget(label3)
         va.addWidget(getHLine(self))
 
-        slider=LabeledSlider(1,10,1,parent=self)
-        slider.sl.setValue(self.settings.value('saving/auto_save_min',2,int))
+        slider=LabeledSlider(5,30,5,parent=self)
+        slider.sl.setValue(self.settings.value('saving/auto_save_min',5,int))
         slider.sl.valueChanged.connect(self.changeSavingInterval)
         slider.setMaximumWidth(400)
 
@@ -373,15 +387,53 @@ class PreferenceDialog(QtWidgets.QDialog):
         return scroll
 
 
-    def chooseSaveFolder(self):
+    @pyqtSlot(QtWidgets.QLineEdit)
+    def chooseSaveFolder(self, le=None):
         '''Prompt for dir choose and store new value'''
 
         fname=QtWidgets.QFileDialog.getExistingDirectory(self,
             'Choose a folder to save documents and database')
 
         if fname:
+            if le is not None:
+                le.setText(fname)
             LOGGER.info('Folder after change = %s' %fname)
             self.new_values['saving/storage_folder']=fname
+
+        return
+
+
+    def createSavingMannerGroup(self):
+        '''Create radiobutton group for file copy or link manner selection'''
+
+        groupbox=QtWidgets.QGroupBox('Copy or link file when adding into library.')
+        ha=QtWidgets.QHBoxLayout()
+        manner=self.settings.value('saving/file_move_manner', type=str)
+
+        for ii in ['Copy File', 'Create Symbolic Link']:
+            buttonii=QtWidgets.QRadioButton(ii)
+            if manner in ii.lower():
+                buttonii.setChecked(True)
+            buttonii.toggled.connect(lambda on: self.savingMannerChange(on))
+            ha.addWidget(buttonii)
+
+        groupbox.setLayout(ha)
+
+        return groupbox
+
+
+    @pyqtSlot(bool)
+    def savingMannerChange(self, on):
+        '''Collect check states in the saving manner radiobutton group'''
+
+        for rii in self.saving_manner_radiogroup.findChildren(QtWidgets.QRadioButton):
+            if rii.isChecked():
+                if 'link' in rii.text().lower():
+                    new_value='link'
+                elif 'copy' in rii.text().lower():
+                    new_value='copy'
+                self.new_values['saving/file_move_manner']=new_value
+                break
 
         return
 
@@ -418,8 +470,8 @@ class PreferenceDialog(QtWidgets.QDialog):
         label.setStyleSheet(self.label_color)
         label.setFont(self.title_label_font)
 
-        self.radio_groupbox=self.createPathTypeGroup('bib')
-        va.addWidget(self.radio_groupbox)
+        self.pathtype_radiogroup=self.createPathTypeGroup('bib')
+        va.addWidget(self.pathtype_radiogroup)
 
         return scroll
 
@@ -433,8 +485,8 @@ class PreferenceDialog(QtWidgets.QDialog):
         label.setStyleSheet(self.label_color)
         label.setFont(self.title_label_font)
 
-        self.radio_groupbox=self.createPathTypeGroup('ris')
-        va.addWidget(self.radio_groupbox)
+        self.pathtype_radiogroup=self.createPathTypeGroup('ris')
+        va.addWidget(self.pathtype_radiogroup)
 
         va.addStretch()
 
@@ -465,7 +517,7 @@ class PreferenceDialog(QtWidgets.QDialog):
         '''Collect check states in the path type radiobutton group'''
 
         LOGGER.debug('export_type = %s' %export_type)
-        for rii in self.radio_groupbox.findChildren(QtWidgets.QRadioButton):
+        for rii in self.pathtype_radiogroup.findChildren(QtWidgets.QRadioButton):
             if rii.isChecked():
                 self.new_values['export/%s/path_type' %export_type]=rii.text().lower()
                 break
@@ -567,8 +619,23 @@ class PreferenceDialog(QtWidgets.QDialog):
         ha=QtWidgets.QHBoxLayout()
         ha.addWidget(label3)
         ha.addWidget(self.spinbox)
-
         va.addLayout(ha)
+
+        #----------------thumbnail dpi section----------------
+        va.addWidget(getHLine(self))
+        label4=QtWidgets.QLabel('PDF thumbnail DPI')
+        label4.setStyleSheet(self.label_color)
+        label4.setFont(self.title_label_font)
+        va.addWidget(label4)
+        va.addWidget(getHLine(self))
+
+        slider3=LabeledSlider(10,30,5,parent=self)
+        slider3.sl.setValue(self.settings.value('view/thumbnail_dpi',30,type=int))
+        slider3.sl.valueChanged.connect(self.changeThumbnailDPI)
+        slider3.setMaximumWidth(400)
+
+        va.addWidget(slider3)
+
         va.addStretch()
 
         return scroll
@@ -592,6 +659,15 @@ class PreferenceDialog(QtWidgets.QDialog):
 
         LOGGER.info('Change recent database number to %s' %value)
         self.new_values['file/recent_open_num']=value
+
+        return
+
+
+    def changeThumbnailDPI(self,value):
+        '''Store the value on the thumbnail dpi slider'''
+
+        LOGGER.debug('Change thumbnail dpi number to %s' %value)
+        self.new_values['view/thumbnail_dpi']=value
 
         return
 

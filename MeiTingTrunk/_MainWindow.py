@@ -22,15 +22,18 @@ import logging.config
 import sqlite3
 import pathlib
 from PyQt5 import QtWidgets
-from PyQt5.QtCore import Qt, QSettings, QTimer, pyqtSlot
+from PyQt5.QtWidgets import QStyle
+from PyQt5.QtCore import Qt, QSettings, QTimer, pyqtSlot, QThread
 from PyQt5.QtGui import QIcon, QFont, QBrush, QColor
 from . import _MainFrame
 from . import resources
-from .lib import sqlitedb
+from .lib import sqlitedb, tools
 from .lib.widgets import PreferenceDialog, ExportDialog, ThreadRunDialog,\
-        ImportDialog, AboutDialog
+        ImportDialog, AboutDialog, MergeNameDialog, SimpleWorker,\
+        ZimDialog
+if tools.isXapianReady():
+    from .lib import xapiandb
 
-#from . import __version__
 from .version import __version__
 
 
@@ -62,7 +65,7 @@ New session started
         self.settings=self.initSettings()
         self.is_loaded=False  # is any database opended
 
-        self.main_frame=_MainFrame.MainFrame(self.settings)
+        self.main_frame=_MainFrame.MainFrame(self.settings, self)
         self.main_frame.view_change_sig.connect(self.viewChangeResponse)
         self.setCentralWidget(self.main_frame)
 
@@ -127,6 +130,10 @@ New session started
                     'Documents/MeiTingTrunk')
             settings.setValue('saving/storage_folder', storage_folder)
 
+            # file copy/link
+            settings.setValue('saving/file_move_manner', 'copy')
+            # 'copy' or 'link'
+
             # auto save
             settings.setValue('saving/auto_save_min', 5),
 
@@ -141,14 +148,25 @@ New session started
 
             # search fields
             settings.setValue('search/search_fields', ['Authors', 'Title',
-                'Abstract', 'Keywords', 'Tags', 'Notes', 'Publication'])
+                'Abstract', 'Keywords', 'Tags', 'Notes', 'Publication', 'PDF'])
             settings.setValue('search/desend_folder', True)
 
             # view control
             settings.setValue('view/show_widgets', ['Toggle Filter List',
                 'Toggle Tab Pane', 'Toggle Meta Tab', 'Toggle Notes Tab',
                 'Toggle BibTex Tab', 'Toggle Scratch Pad Tab',
+                'Toggle PDF Tab',
                 'Toggle Status bar'])
+
+            # sortidx in doc table
+            settings.setValue('view/sortidx', 4)
+            settings.setValue('view/sortorder', 0)
+
+            # pdf thumbnail dpi
+            settings.setValue('view/thumbnail_dpi', 30)
+
+            # use zim as default note source
+            settings.setValue('saving/use_zim_default', False)
 
             settings.sync()
         else:
@@ -183,24 +201,31 @@ New session started
         create_database_action=self.file_menu.addAction('Create New Library')
         open_database_action=self.file_menu.addAction('Open Library')
         self.recent_open_menu=self.file_menu.addMenu('Open Recent')
-        save_database_action=self.file_menu.addAction('Save Library')
-        close_database_action=self.file_menu.addAction('Close Library')
+        self.save_database_action=self.file_menu.addAction('Save Library')
+        self.close_database_action=self.file_menu.addAction('Close Library')
         self.file_menu.addSeparator()
-        create_backup_action=self.file_menu.addAction('Create Backup')
+        #create_backup_action=self.file_menu.addAction('Create Backup')
         quit_action=self.file_menu.addAction('Quit')
 
-        create_database_action.setIcon(QIcon.fromTheme('document-new'))
-        open_database_action.setIcon(QIcon.fromTheme('document-open'))
-        self.recent_open_menu.setIcon(QIcon.fromTheme('document-open-recent'))
-        save_database_action.setIcon(QIcon.fromTheme('document-save'))
-        close_database_action.setIcon(QIcon.fromTheme('call-stop'))
-        create_backup_action.setIcon(QIcon.fromTheme('document-send'))
-        quit_action.setIcon(QIcon.fromTheme('window-close'))
+        create_database_action.setIcon(QIcon.fromTheme('document-new',
+            self.style().standardIcon(QStyle.SP_FileDialogNewFolder)))
+        open_database_action.setIcon(QIcon.fromTheme('document-open',
+            self.style().standardIcon(QStyle.SP_DirOpenIcon)))
+        self.recent_open_menu.setIcon(QIcon.fromTheme('document-open-recent',
+            self.style().standardIcon(QStyle.SP_DirOpenIcon)))
+        self.save_database_action.setIcon(QIcon.fromTheme('document-save',
+            self.style().standardIcon(QStyle.SP_DialogSaveButton)))
+        self.close_database_action.setIcon(QIcon.fromTheme('call-stop',
+            self.style().standardIcon(QStyle.SP_BrowserStop)))
+
+        #create_backup_action.setIcon(QIcon.fromTheme('document-send'))
+        quit_action.setIcon(QIcon.fromTheme('window-close',
+            self.style().standardIcon(QStyle.SP_DialogCloseButton)))
 
         create_database_action.setShortcut('Ctrl+Shift+n')
         open_database_action.setShortcut('Ctrl+o')
-        save_database_action.setShortcut('Ctrl+s')
-        close_database_action.setShortcut('Ctrl+w')
+        self.save_database_action.setShortcut('Ctrl+s')
+        self.close_database_action.setShortcut('Ctrl+w')
         quit_action.setShortcut('Ctrl+q')
 
         #---------------Populate open recent---------------
@@ -231,7 +256,9 @@ New session started
 
         for tii in ['Toggle Filter List', None, 'Toggle Tab Pane',
                 'Toggle Meta Tab', 'Toggle Notes Tab', 'Toggle BibTex Tab',
-                'Toggle Scratch Pad Tab', None, 'Toggle Status bar']:
+                'Toggle Scratch Pad Tab', 'Toggle PDF Tab', None,
+                #'Toggle Scratch Pad Tab', None,
+                'Toggle Status bar']:
             if tii is None:
                 self.view_menu.addSeparator()
             elif tii=='Toggle Status bar':
@@ -256,10 +283,19 @@ New session started
         self.tool_menu=self.menu_bar.addMenu('&Tools')
         self.import_action=QtWidgets.QAction('&Import', self)
         self.export_action=QtWidgets.QAction('&Export', self)
+        self.merge_name_action=QtWidgets.QAction('&Merge Names', self)
+        #self.create_zim_action=QtWidgets.QAction('Create &Zim notebook', self)
         self.tool_menu.addAction(self.import_action)
         self.tool_menu.addAction(self.export_action)
+        self.tool_menu.addAction(self.merge_name_action)
+        #self.tool_menu.addAction(self.create_zim_action)
         if not self.is_loaded:
+            self.import_action.setEnabled(True)
             self.export_action.setEnabled(False)
+            self.save_database_action.setEnabled(False)
+            self.merge_name_action.setEnabled(False)
+            self.close_database_action.setEnabled(False)
+            #self.create_zim_action.setEnabled(False)
 
         #--------------------Help menu--------------------
         self.help_menu=self.menu_bar.addMenu('&Help')
@@ -268,11 +304,13 @@ New session started
         #-----------------Connect signals-----------------
         create_database_action.triggered.connect(self.createDatabaseTriggered)
         open_database_action.triggered.connect(self.openDatabaseTriggered)
-        save_database_action.triggered.connect(self.saveDatabaseTriggered)
-        close_database_action.triggered.connect(self.closeDatabaseTriggered)
+        self.save_database_action.triggered.connect(self.saveDatabaseTriggered)
+        self.close_database_action.triggered.connect(self.closeDatabaseTriggered)
         preference_action.triggered.connect(self.preferenceTriggered)
         self.import_action.triggered.connect(self.importTriggered)
         self.export_action.triggered.connect(self.exportTriggered)
+        self.merge_name_action.triggered.connect(self.mergeNameTriggered)
+        #self.create_zim_action.triggered.connect(self.createZimTriggered)
         self.help_menu.triggered.connect(self.helpMenuTriggered)
         quit_action.triggered.connect(self.close)
         self.view_menu.triggered.connect(self.viewChangeTriggered)
@@ -293,7 +331,9 @@ New session started
                         'Save changes and close?',
                         QtWidgets.QMessageBox.Yes |\
                         QtWidgets.QMessageBox.Discard |\
-                        QtWidgets.QMessageBox.Cancel)
+                        QtWidgets.QMessageBox.Cancel,
+                        QtWidgets.QMessageBox.Yes # default
+                        )
             else:
                 choice=QtWidgets.QMessageBox.question(self, 'Confirm Close',
                         'Close MeiTing Trunk?',
@@ -346,10 +386,18 @@ New session started
             if ext=='':
                 filename='%s.sqlite' %lib_name
                 fname=os.path.join(dirname,filename)
+            lib_folder=os.path.join(dirname, lib_name)
+            xapian_folder=os.path.join(lib_folder, '_xapian_db')
 
             def func(jobid,fname):
                 try:
                     result=sqlitedb.createNewDatabase(fname)
+                    if tools.isXapianReady():
+                        rec=xapiandb.createDatabase(xapian_folder)
+                        if rec is None:
+                            self.logger.error('Failed to create xapian database.')
+                    else:
+                        self.logger.info('No pdftotext or xapian found. Skip xapian creation')
                     return 0,jobid,result
                 except Exception:
                     self.logger.exception('Failed to create new database file')
@@ -446,6 +494,7 @@ New session started
 
             return
 
+        '''
         self.main_frame.status_bar.showMessage('Opening database...')
         QtWidgets.QApplication.processEvents() # needed?
         # progressbar won't work atm, as the sqlitedb is in the same GUI thread.
@@ -461,11 +510,17 @@ New session started
         self.db=db
         # read and parse data
         meta_dict,folder_data,folder_dict=sqlitedb.readSqlite(db)
+
+        # clear 'Opening database' message. This has to happen before loadLibTree()
+        # otherwise table row message will be cleared.
+        self.main_frame.status_bar.clearMessage()
         # load data into GUI
         self.main_frame.loadLibTree(db,meta_dict,folder_data,folder_dict)
         #self.main_frame.progressbar.setVisible(False)
 
         self.is_loaded=True
+        '''
+        self.loadSqlite(fname, load_to_gui=True)
 
         # get sqlite file name without ext as library name
         storage_folder,filename=os.path.split(fname)
@@ -474,6 +529,7 @@ New session started
 
         self.current_lib=lib_name
         self.current_lib_folder=lib_folder
+        self.merge_scores_dict={}
         self.settings.setValue('saving/current_lib_folder', self.current_lib_folder)
         self.setWindowTitle('MEI-TING TRUNK %s: %s' %(__version__, lib_name))
 
@@ -487,13 +543,14 @@ New session started
             msg.setIcon(QtWidgets.QMessageBox.Warning)
             msg.setWindowTitle('Can not find folder')
             msg.setText("Can not find library folder.")
-            msg.setInformativeText("The library folder\n    %s\nmay have be deleted, renamed or removed. \nA new folder is created, but the PDF files are missing."\
+            msg.setInformativeText("The library folder\n    %s\nmay have be deleted or renamed. \nA new folder is created, but the attachment files are missing."\
                     %self.current_lib_folder)
             msg.exec_()
 
             os.makedirs(self.current_lib_folder)
             self.logger.info('Create lib folder: %s' %self.current_lib_folder)
 
+        #-----------Make sure lib collection folder exists-----------
         lib_collection_folder=os.path.join(self.current_lib_folder,'_collections')
         if not os.path.exists(lib_collection_folder):
 
@@ -501,18 +558,59 @@ New session started
             msg.setIcon(QtWidgets.QMessageBox.Warning)
             msg.setWindowTitle('Can not find folder')
             msg.setText("Can not find library folder.")
-            msg.setInformativeText("The library folder\n    %s\nmay have be deleted, renamed or removed. \nA new folder is created, but the PDF files are missing."\
+            msg.setInformativeText("The library folder\n    %s\nmay have be deleted or renamed. \nA new folder is created, but the attachment files are missing."\
                     %lib_collection_folder)
             msg.exec_()
             os.makedirs(lib_collection_folder)
             self.logger.info('Create lib collection folder: %s' %lib_collection_folder)
 
+        #-----------Make sure lib xapian folder exists-----------
+        lib_xapian_folder=os.path.join(self.current_lib_folder,'_xapian_db')
+        if not os.path.exists(lib_xapian_folder):
+
+            if tools.isXapianReady():
+                msg=QtWidgets.QMessageBox()
+                msg.setIcon(QtWidgets.QMessageBox.Warning)
+                msg.setWindowTitle('Can not find folder')
+                msg.setText("Can not find xapian database folder.")
+                msg.setInformativeText("The xapian database folder\n    %s\nmay have be deleted or renamed. \nA new database is created, but a re-run of indexing is needed."\
+                        %lib_xapian_folder)
+                msg.exec_()
+                #os.makedirs(lib_xapian_folder)
+                try:
+                    xapiandb.createDatabase(lib_xapian_folder)
+                    self.logger.info('Create lib xapian folder: %s' %lib_xapian_folder)
+                except:
+                    msg=QtWidgets.QMessageBox()
+                    msg.setIcon(QtWidgets.QMessageBox.Warning)
+                    msg.setWindowTitle('Failed to create xapian database')
+                    msg.setText("Failed to create xapian database")
+                    msg.setInformativeText('''Please check xapian-core, xapian-omega and xapianbindings are installed and work, then re-open the library. See <a href="https://xapian.org/docs/install.html"> https://xapian.org/docs/install.html </a> for more details.''')
+                    msg.exec_()
+                else:
+                    self.main_frame.enablePDFSearch()
+        else:
+            if tools.isXapianReady():
+                self.main_frame.enablePDFSearch()
+
+        #---------------Create cache folder---------------
+        lib_cache_folder=os.path.join(self.current_lib_folder,'_cache')
+        if not os.path.exists(lib_cache_folder):
+            os.makedirs(lib_cache_folder)
+
+
+        #---------------------Actions---------------------
         self.main_frame.auto_save_timer.start()
+        self.startThumbnailThread()
 
         self.logger.info('Start auto save timer.')
 
         self.import_action.setEnabled(True)
         self.export_action.setEnabled(True)
+        self.merge_name_action.setEnabled(True)
+        self.save_database_action.setEnabled(True)
+        self.close_database_action.setEnabled(True)
+        #self.create_zim_action.setEnabled(True)
 
         # add to recent list
         recent=self.settings.value('file/recent_open',[],str)
@@ -536,6 +634,52 @@ New session started
         return
 
 
+    def loadSqlite(self, fname, load_to_gui=True):
+        '''Load data from sqlite and optionally load int gui
+
+        Args:
+            fname (str): file path to the sqlite database.
+        Kwargs:
+            load_to_gui (bool): if True, call main_frame.loadLibTree() to
+                update GUI data. Otherwise only store data.
+        '''
+
+        self.main_frame.status_bar.showMessage('Opening database...')
+        QtWidgets.QApplication.processEvents() # needed?
+        # progressbar won't work atm, as the sqlitedb is in the same GUI thread.
+        #self.main_frame.progressbar.setVisible(True)
+        #self.main_frame.progressbar.setMaximum(0)
+        try:
+            db = sqlite3.connect(fname)
+            self.logger.info('Connected to database: %s' %fname)
+        except:
+            self.logger.exception('Failed to connect to database %s' %fname)
+            return
+
+        self.db=db
+        # read and parse data
+        meta_dict,folder_data,folder_dict=sqlitedb.readSqlite(db)
+
+        # clear 'Opening database' message. This has to happen before loadLibTree()
+        # otherwise table row message will be cleared.
+        self.main_frame.status_bar.clearMessage()
+
+        # load data into GUI
+        if load_to_gui:
+            self.main_frame.loadLibTree(db,meta_dict,folder_data,folder_dict)
+        else:
+            # this is for updating some data from sqlite without re-loading
+            # gui
+            self.main_frame.db=db
+            self.main_frame.meta_dict=meta_dict
+            self.main_frame.folder_data=folder_data
+            self.main_frame.folder_dict=folder_dict
+
+        self.is_loaded=True
+
+        return
+
+
     @pyqtSlot()
     def saveDatabaseTriggered(self):
         self.main_frame.saveToDatabase()
@@ -551,11 +695,18 @@ New session started
                     QtWidgets.QMessageBox.Yes | QtWidgets.QMessageBox.No)
 
         if not ask or (ask and choice==QtWidgets.QMessageBox.Yes):
+
             self.main_frame.clearData()
             self.is_loaded=False
+            self.thumbnail_td.quit()
+            self.thumbnail_td.wait()
 
-            self.import_action.setEnabled(False)
+            self.import_action.setEnabled(True)
             self.export_action.setEnabled(False)
+            self.merge_name_action.setEnabled(False)
+            self.save_database_action.setEnabled(False)
+            self.close_database_action.setEnabled(False)
+            #self.create_zim_action.setEnabled(False)
 
             self.current_lib=None
             self.current_lib_folder=None
@@ -609,6 +760,41 @@ New session started
         return
 
 
+    @pyqtSlot()
+    def mergeNameTriggered(self):
+
+        # NOTE that need to make sure this won't get called before main_frame
+        # has read in a lib
+        diag=MergeNameDialog(self.main_frame.db, self.main_frame.meta_dict,
+                self.merge_scores_dict,
+                self.settings,
+                parent=self)
+        reload_gui=diag.exec_()
+        if reload_gui:
+            self.main_frame.clearData()
+            self.main_frame.loadLibTree(self.main_frame.db,
+                    self.main_frame.meta_dict,
+                    self.main_frame.folder_data,
+                    self.main_frame.folder_dict)
+            self.logger.info('Reload data to gui.')
+
+        return
+
+
+    @pyqtSlot()
+    def createZimTriggered(self):
+
+        # NOTE that need to make sure this won't get called before main_frame
+        # has read in a lib
+        diag=ZimDialog(self.main_frame.meta_dict, self.main_frame.folder_dict,
+                self.main_frame.folder_data, self.settings, parent=self)
+        diag.exec_()
+        self.main_frame.zim_tip_label.setVisible(self.settings.value(
+            'saving/use_zim_default', type=bool))
+
+        return
+
+
     @pyqtSlot(QtWidgets.QAction)
     def viewChangeTriggered(self, action):
         """Change widget visibility in response to View menu actions
@@ -647,3 +833,19 @@ New session started
 
         self.view_action_dict[view_name].setChecked(state)
 
+
+    def startThumbnailThread(self):
+        '''Start the thumbnail generation thread
+
+        Will start a QThread to call function createThumbnails(), which is
+        stopped by setting is_loaded=False and calling the quit() and wait()
+        on the thread. See closeDatabaseTriggered().
+        '''
+
+        self.thumbnail_td=QThread()
+        self.thumbnail_worker=SimpleWorker(0,self.main_frame.createThumbnails)
+        self.thumbnail_worker.moveToThread(self.thumbnail_td)
+        self.thumbnail_td.started.connect(self.thumbnail_worker.processJob)
+        self.thumbnail_td.start()
+
+        return

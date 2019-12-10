@@ -24,6 +24,27 @@ from PyQt5.QtWidgets import QDialogButtonBox
 LOGGER=logging.getLogger(__name__)
 
 
+class SimpleWorker(QObject):
+
+    def __init__(self, id, func):
+        super().__init__()
+        '''Worker used in separate thread.
+
+        Args:
+            id (int): id for the thread/worker.
+            func (function): function object to call in the thread.
+        '''
+
+        self.id=id
+        self.func=func
+
+    @pyqtSlot()
+    def processJob(self):
+        self.func()
+
+        return
+
+
 
 class Worker(QObject):
 
@@ -247,6 +268,8 @@ class Master(QObject):
 
 class ThreadRunDialog(QtWidgets.QDialog):
 
+    abort_job_signal=pyqtSignal()
+
     def __init__(self,func, joblist, show_message='', max_threads=3,
             get_results=False, close_on_finish=True,
             progressbar_style='classic',
@@ -353,6 +376,7 @@ class ThreadRunDialog(QtWidgets.QDialog):
         self.master.abortJobs()
         if self.get_results:
             self.results=self.master.results
+        self.abort_job_signal.emit()
         self.reject()
 
         return

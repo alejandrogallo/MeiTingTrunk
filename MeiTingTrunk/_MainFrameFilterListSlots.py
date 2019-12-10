@@ -39,14 +39,20 @@ class MainFrameFilterListSlots:
         filter_type=self.filter_type_combbox.currentText()
         filter_text=item.text()
         current_folder=self._current_folder
+
         if current_folder:
             folderid=current_folder[1]
 
-            filter_docids=sqlitedb.filterDocs(self.meta_dict,self.folder_data,
-                    filter_type,filter_text,folderid)
+            if folderid=='-1':
+                docids=self.meta_dict.keys()
+            else:
+                docids=self.folder_data[folderid]
+
+            filter_docids=sqlitedb.filterDocs(self.meta_dict, docids,
+                    filter_type, filter_text)
 
             if len(filter_docids)>0:
-                self.loadDocTable(None,filter_docids,sortidx=4,sel_row=0)
+                self.loadDocTable(None,filter_docids,sortidx=None,sel_row=0)
 
             sel=self.filter_type_combbox.currentText()
 
@@ -152,8 +158,8 @@ class MainFrameFilterListSlots:
 
                 # TODO: keep a record of previous sortidx?
                 if folder=='All' and folderid=='-1':
-                    self.loadDocTable(None,sortidx=4,sel_row=0)
+                    self.loadDocTable(None,sortidx=None,sel_row=0)
                 else:
-                    self.loadDocTable((folder,folderid),sortidx=4,sel_row=0)
+                    self.loadDocTable((folder,folderid),sortidx=None,sel_row=0)
 
         return

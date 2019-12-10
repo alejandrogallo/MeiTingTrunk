@@ -27,17 +27,25 @@ setuptools.setup(
             ],
         install_requires=[
             #'qt>=5',
-            'PyQt5',
+            'PyQt5>=5.12',
+            #'sqlite3',
             'pdfminer.six',
             'pypdf2',
             'beautifulsoup4',
             'fuzzywuzzy',
             'bibtexparser',
             'crossrefapi',
-            'RISparser'
+            'RISparser',
+            'send2trash',
+            'python-levenshtein',
+            'PyQtWebEngine'
             ],
         python_requires='>=3',
-        #package_data={'sample': ['
+        include_package_data=True,
+        #package_dir={'': 'MeiTingTrunk'},
+        #package_data={'': ['MeiTingTrunk/lib/pdfjs/*',
+        #'MeiTingTrunk/samples/*'
+        #],},
         entry_points={
             'gui_scripts': ['meitingtrunk = MeiTingTrunk.main:main']
             }

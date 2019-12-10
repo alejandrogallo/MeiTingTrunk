@@ -446,7 +446,7 @@ def searchMultipleLike2(db, text, field_list, folderid, desend=False):
         text (str): search text.
         field_list (list): list of fields to search, including 'Authors',
                           'Title', 'Keywords', 'Tags', 'Notes', 'Publication',
-                          'Abstract'.
+                          'Abstract', 'Citationkey'.
         folderid (str): id of folder, search in done within docs in this folder.
 
     Kwargs:
@@ -510,6 +510,10 @@ def searchMultipleLike2(db, text, field_list, folderid, desend=False):
             qkk='''SELECT id, Documents.abstract, 'abstract'
             FROM Documents
             WHERE Documents.abstract LIKE ?'''
+        elif kk=='Citationkey':
+            qkk='''SELECT id, Documents.citationKey, 'citationkey'
+            FROM Documents
+            WHERE Documents.citationKey LIKE ?'''
         else:
             continue
 
@@ -533,12 +537,14 @@ def searchMultipleLike2(db, text, field_list, folderid, desend=False):
     if folderid=='-1':
         query=query %''
         ret=cin.execute(query)
+        subfolderids=None
     elif folderid=='-2':
         query=query %'''
         LEFT JOIN Documents ON Documents.id=search_res.did
         WHERE Documents.confirmed='false'
         '''
         ret=cin.execute(query)
+        subfolderids=folderid
     else:
         if desend:
             folder_dict=getFolders(db)
@@ -556,7 +562,7 @@ def searchMultipleLike2(db, text, field_list, folderid, desend=False):
 
     ret=ret.fetchall()
 
-    return ret
+    return ret, subfolderids
 
 
 

@@ -82,11 +82,15 @@ You may use, distribute and modify this code under the
 terms of the GPLv3 license.
 '''
 
+import os
+import subprocess
+import glob
 from PyQt5 import QtWidgets
 from PyQt5.QtCore import Qt
+from PyQt5 import QtGui
 from .lib import sqlitedb
 from .lib import bibparse
-from .lib.tools import getHLine
+from .lib.tools import getHLine, hasPoppler, ZimNoteNotFoundError
 
 
 
@@ -159,6 +163,9 @@ def prepareDocs(meta_dict, docids):
         data.append(aii)
 
     return data
+
+# NOTE: need to put this after prepareDocs to break a cyclic import
+from .lib.widgets.zim_dialog import readZimNote
 
 
 class MainFrameLoadData:
@@ -242,7 +249,7 @@ class MainFrameLoadData:
 
 
     def loadDocTable(self, folder=None, docids=None, sortidx=None,
-            sel_row=None):
+            sortorder=0, sel_row=None):
         """Load the doc table
 
         Kwargs:
@@ -250,7 +257,14 @@ class MainFrameLoadData:
                    within the folder. If None, load the <All> folder.
             docids (list or None): if list, a list of doc ids to load. If None,
                                    load according to the <folder> arg.
-            sortidx (int): int in [0,9], index of the column to sort the table
+            sortidx (int or None or False): int in [0,9], index of the column
+                to sort the table. If None, use current sortidx.
+                If False, don't do sorting. This last case is for adding new
+                docs to the folder and I want the new docs to appear at the
+                end, so scrolling to and selecting them is easier, and makes
+                sense.
+            sortorder (int): sort order, Qt.AscendingOrder (0), or
+                             Qt.DescendingOrder (1), order to sort the columns.
                            with.
             sel_row (int or None): index of the row to select after loading.
                                    If None, don't change selection.
@@ -287,10 +301,15 @@ class MainFrameLoadData:
         tablemodel.arraydata=data
 
         #--------------------Sort rows--------------------
-        if sortidx is not None and sortidx in range(tablemodel.columnCount(None)):
-            self.logger.info('sort idx = %s' %sortidx)
-
-            tablemodel.sort(sortidx,Qt.AscendingOrder)
+        if sortidx != False:
+            if sortidx is None:
+                sortidx=self.settings.value('view/sortidx', 4, type=int)
+                sortorder=self.settings.value('view/sortorder', 0, type=int)
+                tablemodel.sort(sortidx, sortorder)
+            else:
+                #if sortidx is not None and sortidx in range(tablemodel.columnCount(None)):
+                self.logger.info('sort idx = %s. sortorder = %s' %(sortidx, sortorder))
+                tablemodel.sort(sortidx, sortorder)
 
         if len(data)>0:
             self.enableMetaTab()
@@ -308,6 +327,8 @@ class MainFrameLoadData:
                 if current_row==sel_row:
                     self.logger.info('@@@@@row not change. force sel doc')
                     self.selDoc(self.doc_table.currentIndex(),None)
+            else:
+                self.selDoc(self.doc_table.currentIndex(),None)
 
             self.status_bar.showMessage('%d rows' %len(data))
         else:
@@ -385,9 +406,9 @@ class MainFrameLoadData:
         if isinstance(omit_keys,str) and omit_keys=='':
             omit_keys=[]
 
-        path_type=self.settings.value('export/bib/path_type',str)
+        path_type=self.settings.value('export/bib/path_type',type=str)
         if path_type=='absolute':
-            prefix=self.settings.value('saving/current_lib_folder',str)
+            prefix=self.settings.value('saving/current_lib_folder',type=str)
         elif path_type=='relative':
             prefix=''
 
@@ -408,11 +429,107 @@ class MainFrameLoadData:
         if docid is None:
             return
 
-        noteii=self.meta_dict[docid]['notes']
+        use_zim_default=self.settings.value('saving/use_zim_default', type=bool)
+
+        #######################################################################
+        #                       Disable use_zim_default                       #
+        use_zim_default=False
+        #######################################################################
+
+        if use_zim_default:
+            self.logger.debug('use_zim_default = %s' %use_zim_default)
+            try:
+                noteii=readZimNote(self._zim_folder, docid)
+            except ZimNoteNotFoundError as e:
+                self.logger.exception('zim note not found. Revert to meta_dict. e = %s' %e)
+                noteii=self.meta_dict[docid]['notes']
+            except Exception as e:
+                self.logger.exception('Failed to read zim note. e = %s' %e)
+                noteii=self.meta_dict[docid]['notes']
+        else:
+            noteii=self.meta_dict[docid]['notes']
 
         self.logger.debug('noteii = %s' %noteii)
         self.note_textedit.clear()
         self.note_textedit.setText(noteii)
+
+        return
+
+
+    def loadPDFThumbnail(self, docid=None):
+        """Load a thumbnail of the 1st page of a pdf
+
+        Kwargs:
+            docid (int or None): if int, the id of the doc to load.
+        """
+
+        if docid is None:
+            return
+
+        files=self.meta_dict[docid]['files_l']
+        if len(files)==0:
+            self.pdf_viewer.clearLayout()
+            return
+
+        dpi=self.settings.value('view/thumbnail_dpi', type=str)
+
+        lib_folder=self.settings.value('saving/current_lib_folder', type=str)
+        cache_folder=os.path.join(lib_folder, '_cache')
+
+        # get the 1st file
+        filepath=files[0]
+        filepath=os.path.join(lib_folder, filepath)
+        filename=os.path.split(filepath)[1]
+        outfile=os.path.join(cache_folder, '%s-%s' %(filename, dpi))
+
+        self.logger.debug('outfile = %s' %outfile)
+
+        # prefer poppler over imagemagic
+        # NO, imagemagic for some reason doesn't allow pdf conversion, so f it.
+        if hasPoppler():
+            cmd=['pdftoppm', filepath, outfile, '-jpeg',
+                    '-r', dpi]
+        else:
+            #if hasImageMagic():
+                #cmd=['convert', '-density', dpi, filepath, outfile]
+            #else:
+                #return
+            label=QtWidgets.QLabel()
+            poppler='https://poppler.freedesktop.org/'
+            label.setText('''Requires 'poppler' to create previews. See <a href="%s"> %s </a> for installation details
+            ''' %(poppler, poppler))
+            label.setTextFormat(Qt.RichText)
+            label.setWordWrap(True)
+            self.pdf_viewer.clearLayout()
+            self.pdf_viewer.layout.addWidget(label)
+            return
+
+        #-----------Try finding saved thumbnail-----------
+        glob_paths=os.path.join(cache_folder, '%s-%s*.jpg' %(filename, dpi))
+        outfiles=glob.glob(glob_paths)
+        if len(outfiles)>0:
+            outfiles.sort()
+            tb_imgs=(QtGui.QPixmap(fii) for fii in outfiles)
+            self.logger.debug('Using cached thumbnail.')
+        else:
+            try:
+                proc=subprocess.Popen(cmd, stdout=subprocess.PIPE,
+                    stderr=subprocess.PIPE)
+                proc.wait()
+            except:
+                return
+            else:
+                outfiles=glob.glob(glob_paths)
+                outfiles.sort()
+                tb_imgs=(QtGui.QPixmap(fii) for fii in outfiles)
+                self.logger.debug('Generate a new thumbnail.')
+
+        #--------------------Add images--------------------
+        self.pdf_viewer.clearLayout()
+        for pii in tb_imgs:
+            labelii=QtWidgets.QLabel(self)
+            labelii.setPixmap(pii)
+            self.pdf_viewer.layout.addWidget(labelii)
 
         return
 

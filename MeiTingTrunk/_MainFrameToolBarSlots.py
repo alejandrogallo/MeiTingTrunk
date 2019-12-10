@@ -17,6 +17,7 @@ terms of the GPLv3 license.
 '''
 
 from PyQt5.QtCore import Qt, pyqtSlot
+from PyQt5.QtGui import QBrush
 from PyQt5 import QtWidgets
 from .lib import sqlitedb
 from .lib import bibparse, risparse
@@ -408,6 +409,7 @@ class MainFrameToolBarSlots:
                 'Checking duplicates in folder "%s".' %current_folder)
 
         self.duplicate_result_frame.checkDuplicates(self.meta_dict,
+                self.folder_dict,
                 self._current_folder,
                 docids,
                 None)
@@ -432,6 +434,30 @@ class MainFrameToolBarSlots:
             self.loadBibTab(docid)
             self.loadNoteTab(docid)
 
+            #------------Remove highlights for all folders-------
+            self.removeFolderHighlights()
+
+            #-------------------Get folders-------------------
+            folders=self.meta_dict[docid]['folders_l']
+            folders=[str(fii[0]) for fii in folders]
+            self.logger.debug('Ids of folders containing doc (%s): %s' %(docid, folders))
+
+            #---------Highlight folders contaning doc---------
+            hi_color=self.settings.value('display/folder/highlight_color_br',
+                    QBrush)
+            for fii in folders:
+                mii=self.libtree.findItems(fii, Qt.MatchExactly | Qt.MatchRecursive,
+                        column=1)
+                if len(mii)>0:
+                    for mjj in mii:
+                        mjj.setBackground(0, hi_color)
+
+            #------------Show confirm review frame------------
+            if self.meta_dict[docid]['confirmed'] in [None, 'false']:
+                self.confirm_review_frame.setVisible(True)
+            else:
+                self.confirm_review_frame.setVisible(False)
+
         return
 
 
@@ -450,6 +476,9 @@ class MainFrameToolBarSlots:
         NOTE that as search is done in the sqlite data, a saving is first
         called.
         """
+
+        if not self.parent.is_loaded:
+            return
 
         text=self.search_bar.text()
         self.logger.info('Searched term = %s' %text)
@@ -494,7 +523,20 @@ class MainFrameToolBarSlots:
         self.status_bar.showMessage('Searching ...')
         self.doc_table.setVisible(False)
         self.search_res_frame.search(self.db, text, new_search_fields,
-                current_folder[1], self.meta_dict, desend)
+                current_folder[1], self.meta_dict, self.folder_data, desend)
+
+        return
+
+
+    def enablePDFSearch(self):
+
+        self.pdf_search_action.setEnabled(True)
+
+        search_fields=self.settings.value('search/search_fields',[],str)
+        if isinstance(search_fields,str) and search_fields=='':
+            search_fields=[]
+        if 'PDF' in search_fields:
+            self.pdf_search_checkbox.setChecked(True)
 
         return
 
@@ -536,14 +578,24 @@ class MainFrameToolBarSlots:
         newitem.setIcon(0,diropen_icon)
         newitem.setFlags(newitem.flags() | Qt.ItemIsEditable)
 
+        # add folder
         self.folder_dict[newid]=(foldername,'-1')
         self.folder_data[newid]=docids
+
+        # add folder to docs
+        for idii in docids:
+            foldersii=self.meta_dict[idii]['folders_l']
+            if (newid, foldername) not in foldersii:
+                foldersii.append((newid, foldername))
+            self.meta_dict[idii]['folders_l']=foldersii
+
         self.libtree.addTopLevelItem(newitem)
         self.libtree.scrollToItem(newitem)
         self.libtree.setCurrentItem(newitem)
 
         self.logger.info('New folder id=%s' %newid)
         self.changed_folder_ids.append(newid)
+        self.changed_doc_ids.extend(docids)
 
         return
 

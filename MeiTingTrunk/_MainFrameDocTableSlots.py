@@ -15,14 +15,16 @@ terms of the GPLv3 license.
 '''
 
 import os
+import platform
 import subprocess
 from PyQt5.QtCore import Qt, pyqtSignal, QTimer, pyqtSlot, QModelIndex
 from PyQt5 import QtWidgets
+from PyQt5.QtWidgets import QStyle
 from PyQt5.QtGui import QFont, QBrush, QColor, QCursor, QIcon
 from .lib import sqlitedb
 from .lib import bibparse, risparse
 from .lib.tools import parseAuthors
-from .lib.widgets import Master, FailDialog
+from .lib.widgets import Master, FailDialog, PDFFrame
 
 
 class MainFrameDocTableSlots:
@@ -93,36 +95,42 @@ class MainFrameDocTableSlots:
         """
 
         rowid=current.row()
-        docid=self._tabledata[rowid][0]
-        self.logger.info('Selected rowid = %s. docid = %s' %(rowid, docid))
 
-        self.loadMetaTab(docid)
-        self.loadBibTab(docid)
-        self.loadNoteTab(docid)
+        if rowid>=0 and rowid<len(self._tabledata):
+            docid=self._tabledata[rowid][0]
+            self.logger.info('Selected rowid = %s. docid = %s' %(rowid, docid))
 
-        #------------Remove highlights for all folders-------
-        self.removeFolderHighlights()
+            self.loadMetaTab(docid)
+            self.loadBibTab(docid)
+            self.loadNoteTab(docid)
 
-        #-------------------Get folders-------------------
-        folders=self.meta_dict[docid]['folders_l']
-        folders=[str(fii[0]) for fii in folders]
-        self.logger.debug('Ids of folders containing doc (%s): %s' %(docid, folders))
+            # only call thumbnail load if PDF tab is current
+            if self.tabs.currentWidget() == self.t_pdf:
+                self.loadPDFThumbnail(docid)
 
-        #---------Highlight folders contaning doc---------
-        hi_color=self.settings.value('display/folder/highlight_color_br',
-                QBrush)
-        for fii in folders:
-            mii=self.libtree.findItems(fii, Qt.MatchExactly | Qt.MatchRecursive,
-                    column=1)
-            if len(mii)>0:
-                for mjj in mii:
-                    mjj.setBackground(0, hi_color)
+            #------------Remove highlights for all folders-------
+            self.removeFolderHighlights()
 
-        #------------Show confirm review frame------------
-        if self.meta_dict[docid]['confirmed'] in [None, 'false']:
-            self.confirm_review_frame.setVisible(True)
-        else:
-            self.confirm_review_frame.setVisible(False)
+            #-------------------Get folders-------------------
+            folders=self.meta_dict[docid]['folders_l']
+            folders=[str(fii[0]) for fii in folders]
+            self.logger.debug('Ids of folders containing doc (%s): %s' %(docid, folders))
+
+            #---------Highlight folders contaning doc---------
+            hi_color=self.settings.value('display/folder/highlight_color_br',
+                    QBrush)
+            for fii in folders:
+                mii=self.libtree.findItems(fii, Qt.MatchExactly | Qt.MatchRecursive,
+                        column=1)
+                if len(mii)>0:
+                    for mjj in mii:
+                        mjj.setBackground(0, hi_color)
+
+            #------------Show confirm review frame------------
+            if self.meta_dict[docid]['confirmed'] in [None, 'false']:
+                self.confirm_review_frame.setVisible(True)
+            else:
+                self.confirm_review_frame.setVisible(False)
 
         return
 
@@ -152,26 +160,30 @@ class MainFrameDocTableSlots:
         trashed_folder_ids=self._trashed_folder_ids+['-3']
 
         open_action=menu.addAction('&Open File Externally')
-        open_action.setIcon(QIcon.fromTheme('document-open'))
+        open_action.setIcon(QIcon.fromTheme('document-open',
+                self.style().standardIcon(QStyle.SP_FileIcon)))
         open_action.setShortcut('O')
 
         open_folder_action=menu.addAction('Open Containing &Folder')
-        #open_folder_action.setIcon(QIcon.fromTheme('system-file-manager'))
-        open_folder_action.setIcon(self.style().standardIcon(
-            QtWidgets.QStyle.SP_DirIcon))
+        open_folder_action.setIcon(QIcon.fromTheme('folder',
+                self.style().standardIcon(QStyle.SP_FileDialogStart)))
         open_folder_action.setShortcut('F')
 
         #-----------------Deletion actions-----------------
         del_from_folder_action=QtWidgets.QAction('&Delete From Current Folder',
                 menu)
-        del_from_folder_action.setIcon(QIcon.fromTheme('user-trash'))
+        del_from_folder_action.setIcon(QIcon.fromTheme('user-trash',
+                self.style().standardIcon(QStyle.SP_TrashIcon)))
         del_from_folder_action.setShortcut('D')
 
         del_from_lib_action=QtWidgets.QAction('Delete From Library',menu)
-        del_from_lib_action.setIcon(QIcon.fromTheme('user-trash'))
+        del_from_lib_action.setIcon(QIcon.fromTheme('user-trash',
+                self.style().standardIcon(QStyle.SP_TrashIcon)))
 
         del_from_trash_action=QtWidgets.QAction('Delete From Trash',menu)
-        del_from_trash_action.setIcon(QIcon.fromTheme('edit-delete'))
+        del_from_trash_action.setIcon(QIcon.fromTheme('edit-delete',
+                self.style().standardIcon(QStyle.SP_TrashIcon)))
+        #self.style().standardIcon(QStyle.SP_MessageBoxCritical)))
 
         if current_folderid=='-1':
             menu.addAction(del_from_lib_action)
@@ -186,7 +198,7 @@ class MainFrameDocTableSlots:
         #-------------Mark needs review action-------------
         mark_needsreview_action=QtWidgets.QAction('&Mark document as Needs Review',menu)
         mark_needsreview_action.setIcon(self.style().standardIcon(
-            QtWidgets.QStyle.SP_MessageBoxInformation))
+            QStyle.SP_MessageBoxInformation))
         mark_needsreview_action.setShortcut('M')
 
         if current_folderid!='-2':
@@ -194,24 +206,29 @@ class MainFrameDocTableSlots:
 
         #--------------Duplicate check action--------------
         check_duplicate_folder_action=menu.addAction('Check Du&plicates Within Folder')
-        check_duplicate_folder_action.setIcon(QIcon.fromTheme('edit-find'))
+        check_duplicate_folder_action.setIcon(QIcon.fromTheme('edit-find',
+                self.style().standardIcon(QStyle.SP_FileDialogContentsView)))
         check_duplicate_folder_action.setShortcut('P')
 
         check_duplicate_lib_action=menu.addAction('Check Duplicates Within Library')
-        check_duplicate_lib_action.setIcon(QIcon.fromTheme('edit-find'))
+        check_duplicate_lib_action.setIcon(QIcon.fromTheme('edit-find',
+                self.style().standardIcon(QStyle.SP_FileDialogContentsView)))
 
         #------------------Export actions------------------
         menu.addSeparator()
         export_bib_action=menu.addAction('Export to &bibtex File')
-        export_bib_action.setIcon(QIcon.fromTheme('document-save-as'))
+        export_bib_action.setIcon(QIcon.fromTheme('document-save-as',
+                self.style().standardIcon(QStyle.SP_DialogSaveButton)))
         export_bib_action.setShortcut('B')
 
         export_ris_action=menu.addAction('Export to &RIS File')
-        export_ris_action.setIcon(QIcon.fromTheme('document-save-as'))
+        export_ris_action.setIcon(QIcon.fromTheme('document-save-as',
+                self.style().standardIcon(QStyle.SP_DialogSaveButton)))
         export_ris_action.setShortcut('R')
 
         copy_clipboard_action=menu.addAction('Export Citation To &Clipboard')
-        copy_clipboard_action.setIcon(QIcon.fromTheme('edit-copy'))
+        copy_clipboard_action.setIcon(QIcon.fromTheme('edit-copy',
+                self.style().standardIcon(QStyle.SP_FileDialogDetailedView)))
         copy_clipboard_action.setShortcut('C')
 
         sel_rows=self.doc_table.selectionModel().selectedRows()
@@ -250,7 +267,7 @@ class MainFrameDocTableSlots:
                     self.delFromFolder(docids, foldername, folderid, True)
 
                 elif action==del_from_lib_action:
-                    self.delDoc(docids,True)
+                    self.delDoc(docids,True,True)
 
                 elif action==del_from_trash_action:
                     self.destroyDoc(docids,current_folderid,True,True)
@@ -288,8 +305,19 @@ class MainFrameDocTableSlots:
         NOTE: need to re-write this for Windows version.
         """
 
+        current_os=platform.system()
+        if current_os=='Linux':
+            open_command='xdg-open'
+        elif current_os=='Darwin':
+            open_command='open'
+        elif current_os=='Windows':
+            raise Exception("Currently only support Linux and Mac.")
+        else:
+            raise Exception("Currently only support Linux and Mac.")
+
         self.logger.info('docids = %s' %docids)
-        lib_folder=self.settings.value('saving/current_lib_folder',str)
+        self.logger.info('OS = %s, open command = %s' %(current_os, open_command))
+        lib_folder=self.settings.value('saving/current_lib_folder',type=str)
 
         for docii in docids:
             file_pathii=self.meta_dict[docii]['files_l'][0] # take the 1st file
@@ -307,15 +335,18 @@ class MainFrameDocTableSlots:
 
             self.logger.debug('docid = %s. file_path = %s' %(docii, file_pathii))
 
-            prop=subprocess.call(('xdg-open', file_pathii))
+            prop=subprocess.call((open_command, file_pathii))
             if prop==0:
                 # set read to True
                 self.meta_dict[docii]['read']='true'
                 self.changed_doc_ids.append(docii)
 
         # refresh to show read change
-        self.loadDocTable(folder=self._current_folder,sortidx=4,
-                sel_row=None)
+        #self.loadDocTable(folder=self._current_folder,sortidx=False,
+                #sel_row=None)
+        self.loadDocTable(docids=self._current_docids,
+                sortidx=False,
+                sel_row=self.doc_table.currentIndex().row())
 
         return
 
@@ -332,22 +363,36 @@ class MainFrameDocTableSlots:
         NOTE: need to re-write this for Windows verion.
         """
 
+        current_os=platform.system()
+        if current_os not in ['Linux', 'Darwin']:
+            self.logger.exception('Currently only support Linux and Mac.')
+            raise Exception("Currently only support Linux and Mac.")
+
         self.logger.info('docids = %s' %docids)
 
-        #------------Get default file mananger------------
-        prop=subprocess.Popen(['xdg-mime','query','default','inode/directory'],
-                stdout=subprocess.PIPE, stderr=subprocess.PIPE)
-        file_man=prop.communicate()[0].decode('ascii').strip().replace('.desktop','')
+        if current_os=='Linux':
+            #------------Get default file mananger------------
+            prop=subprocess.Popen(['xdg-mime','query','default','inode/directory'],
+                    stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+            file_man=prop.communicate()[0].decode('ascii').strip().replace('.desktop','')
+            self.logger.info('OS = %s, file_man = %s' %(current_os, file_man))
+
+        elif current_os=='Darwin':
+            file_man='open'
+            self.logger.info('OS = %s, file_man = %s' %(current_os, file_man))
 
         #----------------Open file manager----------------
-        lib_folder=self.settings.value('saving/current_lib_folder',str)
+        lib_folder=self.settings.value('saving/current_lib_folder',type=str)
         for docii in docids:
             file_pathii=self.meta_dict[docii]['files_l'][0] # take the 1st file
             file_pathii=os.path.join(lib_folder,file_pathii)
 
             self.logger.debug('docid = %s. file_path = %s' %(docii, file_pathii))
 
-            prop=subprocess.call((file_man, file_pathii))
+            if current_os=='Darwin':
+                prop=subprocess.call((file_man, '-R', file_pathii))
+            else:
+                prop=subprocess.call((file_man, file_pathii))
 
         return
 
@@ -401,14 +446,17 @@ class MainFrameDocTableSlots:
                     %self.meta_dict[idii]['deletionPending'])
 
         if reload_table:
-            self.loadDocTable(folder=(foldername,folderid),sel_row=None)
+            #current_row=self.doc_table.currentIndex().row()
+            self.loadDocTable(folder=(foldername,folderid),sortidx=None,
+                    sel_row=None)
+            #self.selDoc(self.doc_table.currentIndex(),None)
 
 
         return
 
 
-    @pyqtSlot(list, bool)
-    def delDoc(self, docids, reload_table):
+    @pyqtSlot(list, bool, bool)
+    def delDoc(self, docids, reload_table, ask=True):
         """Delete docs from the library (across all folders)
 
         Args:
@@ -428,11 +476,12 @@ class MainFrameDocTableSlots:
 
         self.logger.info('docids = %s' %docids)
 
-        choice=QtWidgets.QMessageBox.question(self, 'Confirm deletion',
-                'Confirm deleting a document from library?',
-                QtWidgets.QMessageBox.Yes | QtWidgets.QMessageBox.No)
+        if ask:
+            choice=QtWidgets.QMessageBox.question(self, 'Confirm deletion',
+                    'Confirm deleting a document from library?',
+                    QtWidgets.QMessageBox.Yes | QtWidgets.QMessageBox.No)
 
-        if choice==QtWidgets.QMessageBox.Yes:
+        if not ask or choice==QtWidgets.QMessageBox.Yes:
 
             for idii in docids:
 
@@ -453,7 +502,10 @@ class MainFrameDocTableSlots:
                         %self.meta_dict[idii]['deletionPending'])
 
             if reload_table:
-                self.loadDocTable(folder=self._current_folder,sel_row=None)
+                #current_row=self.doc_table.currentIndex().row()
+                self.loadDocTable(folder=self._current_folder,sortidx=None,
+                        sel_row=None)
+                #self.selDoc(self.doc_table.currentIndex(),None)
 
         return
 
@@ -481,7 +533,7 @@ class MainFrameDocTableSlots:
 
         row=self.doc_table.currentIndex().row()
         # didn't find a better way to refresh the table view
-        self.loadDocTable(folder=self._current_folder,sortidx=4,
+        self.loadDocTable(docids=self._current_docids,sortidx=False,
                 sel_row=row)
 
         return
@@ -527,7 +579,10 @@ class MainFrameDocTableSlots:
 
         if not ask or (ask and choice==QtWidgets.QMessageBox.Yes):
 
-            current_foldername=self.folder_dict[current_folderid][0]
+            if current_folderid=='-3':
+                current_foldername='Trash'
+            else:
+                current_foldername=self.folder_dict[current_folderid][0]
 
             for idii in docids:
 
@@ -567,7 +622,8 @@ class MainFrameDocTableSlots:
                 self.logger.info('Deleted %s from meta_dict' %idii)
 
             if reload_table:
-                self.loadDocTable(folder=self._current_folder,sel_row=None)
+                self.loadDocTable(folder=self._current_folder, sortidx=None,
+                        sel_row=None)
 
         return
 
@@ -641,7 +697,7 @@ class MainFrameDocTableSlots:
             # abs v.s. relative file paths
             path_type=self.settings.value('export/bib/path_type',str)
             if path_type=='absolute':
-                prefix=self.settings.value('saving/current_lib_folder',str)
+                prefix=self.settings.value('saving/current_lib_folder',type=str)
             elif path_type=='relative':
                 prefix=''
 
@@ -723,7 +779,7 @@ class MainFrameDocTableSlots:
         if fname:
             path_type=self.settings.value('export/ris/path_type',str)
             if path_type=='absolute':
-                prefix=self.settings.value('saving/current_lib_folder',str)
+                prefix=self.settings.value('saving/current_lib_folder',type=str)
             elif path_type=='relative':
                 prefix=''
 
@@ -848,7 +904,7 @@ class MainFrameDocTableSlots:
             listwidget=QtWidgets.QListWidget()
             listwidget.setSelectionMode(QtWidgets.QAbstractItemView.ExtendedSelection)
 
-            lib_folder=self.settings.value('saving/current_lib_folder',str)
+            lib_folder=self.settings.value('saving/current_lib_folder',type=str)
             for fii in files:
                 fii=os.path.join(lib_folder,fii)
                 listwidget.addItem(fii)
@@ -913,7 +969,58 @@ class MainFrameDocTableSlots:
                 'Checking duplicates in folder "%s".' %current_folder[0])
 
         self.duplicate_result_frame.checkDuplicates(self.meta_dict,
+                self.folder_dict,
                 current_folder, docids1, docids)
 
         return
+
+
+    def openPDFViewer(self):
+        '''Open a dialog showing the PDF viewer
+
+        This is used as a slot to the SPACE key shortcut bound to the
+        doc_table. See _MainFrame.createDocTable().
+        '''
+
+        docid=self._current_doc
+
+        if docid is None:
+            return
+
+        self.logger.debug('docid = %s' %docid)
+
+        files=self.meta_dict[docid]['files_l']
+        if len(files)==0:
+            return
+
+        lib_folder=self.settings.value('saving/current_lib_folder', type=str)
+        filepath=files[0]
+
+        try:
+            diag=QtWidgets.QDialog(self)
+            diag.setWindowTitle(os.path.split(filepath)[1])
+            diag.setWindowFlags(
+                    Qt.Window |
+                    Qt.WindowTitleHint |
+                    Qt.WindowSystemMenuHint |
+                    Qt.WindowMinimizeButtonHint |
+                    Qt.WindowMaximizeButtonHint |
+                    Qt.WindowCloseButtonHint |
+                    Qt.WindowStaysOnTopHint
+                    )
+
+            diag.resize(700,600)
+            va=QtWidgets.QVBoxLayout(diag)
+
+            pdfframe=PDFFrame(diag)
+            va.addWidget(pdfframe)
+
+            pdfframe.loadFile(lib_folder, filepath)
+
+            diag.show()
+        except:
+            self.logger.warning('Failed to launch pdf viewer.')
+
+
+
 

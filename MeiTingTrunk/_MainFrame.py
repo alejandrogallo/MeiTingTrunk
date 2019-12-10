@@ -41,19 +41,22 @@ terms of the GPLv3 license.
 '''
 
 
+import os
 import logging
 from PyQt5 import QtWidgets
-from PyQt5.QtCore import Qt, QTimer, pyqtSlot
+from PyQt5.QtCore import Qt, QTimer, pyqtSlot, QSize
 from PyQt5.QtGui import QIcon, QFont, QBrush, QColor
+from PyQt5.QtWidgets import QStyle
 
 from . import _MainFrameLoadData, _MainFrameDataSlots, _MainFrameToolBarSlots,\
         _MainFrameLibTreeSlots, _MainFrameFilterListSlots, _MainFrameDocTableSlots,\
         _MainFrameMetaTabSlots, _MainFrameOtherSlots, _MainFrameProperties
 from .lib.tools import getMinSizePolicy, getXMinYExpandSizePolicy, \
-        getXExpandYMinSizePolicy, getXExpandYExpandSizePolicy, getHLine
+        getXExpandYMinSizePolicy, getXExpandYExpandSizePolicy, getHLine,\
+        hasXapian
 from .lib.widgets import MyTreeWidget, TableModel,\
         MyHeaderView, MetaTabScroll, CheckDuplicateFrame, NoteTextEdit,\
-        SearchResFrame
+        SearchResFrame, PDFPreviewer
 
 
 
@@ -67,10 +70,11 @@ class MainFrame(QtWidgets.QWidget,_MainFrameLoadData.MainFrameLoadData,
         _MainFrameOtherSlots.MainFrameOtherSlots,
         _MainFrameProperties.MainFrameProperties
         ):
-    def __init__(self,settings):
+    def __init__(self,settings, parent):
         super(MainFrame,self).__init__()
 
         self.settings=settings
+        self.parent=parent
         self.logger=logging.getLogger(__name__)
         self.initUI()
         self.auto_save_timer=QTimer(self)
@@ -253,7 +257,8 @@ class MainFrame(QtWidgets.QWidget,_MainFrameLoadData.MainFrameLoadData,
                     cdii.setChecked(True)
                     button.setDefaultAction(addii)
                     button.setText('Add')
-                    button.setIcon(QIcon.fromTheme('document-new'))
+                    button.setIcon(QIcon.fromTheme('document-new',
+                        self.style().standardIcon(QStyle.SP_FileDialogDetailedView)))
                     self.settings.setValue('import/default_add_action',aii)
                 else:
                     addii.setShortcut('')
@@ -288,7 +293,8 @@ class MainFrame(QtWidgets.QWidget,_MainFrameLoadData.MainFrameLoadData,
 
         # these has to happen after setDefaultAction()
         button.setText('Add')
-        button.setIcon(QIcon.fromTheme('document-new'))
+        button.setIcon(QIcon.fromTheme('document-new',
+            self.style().standardIcon(QStyle.SP_FileDialogDetailedView)))
         button.setMenu(menu)
         button.setPopupMode(QtWidgets.QToolButton.MenuButtonPopup)
 
@@ -309,7 +315,8 @@ class MainFrame(QtWidgets.QWidget,_MainFrameLoadData.MainFrameLoadData,
         button.setDefaultAction(self.create_folder_action)
 
         button.setText('Create Folder')
-        button.setIcon(QIcon.fromTheme('folder-new'))
+        button.setIcon(QIcon.fromTheme('folder-new',
+            self.style().standardIcon(QStyle.SP_FileDialogNewFolder)))
         button.setMenu(menu)
         button.setPopupMode(QtWidgets.QToolButton.MenuButtonPopup)
 
@@ -323,7 +330,8 @@ class MainFrame(QtWidgets.QWidget,_MainFrameLoadData.MainFrameLoadData,
         button=QtWidgets.QToolButton(self)
         button.setToolButtonStyle(Qt.ToolButtonTextBesideIcon)
         button.setText('Check Duplicates')
-        button.setIcon(QIcon.fromTheme('scanner'))
+        button.setIcon(QIcon.fromTheme('scanner',
+            self.style().standardIcon(QStyle.SP_FileDialogContentsView)))
         button.clicked.connect(self.checkDuplicateClicked)
 
         return button
@@ -339,12 +347,26 @@ class MainFrame(QtWidgets.QWidget,_MainFrameLoadData.MainFrameLoadData,
             search_fields=[]
 
         # add search fields menu
+        lib_xapian_folder=os.path.join(self.settings.value(
+            'saving/current_lib_folder', type=str), '_xapian_db')
+        if hasXapian() and os.path.exists(lib_xapian_folder):
+            has_pdf=True
+        else:
+            has_pdf=False
+
         for fieldii in ['Authors', 'Title', 'Abstract', 'Keywords', 'Tags',
-                'Notes', 'Publication']:
+                'Notes', 'Publication', 'PDF', 'Citationkey']:
             cbii=QtWidgets.QCheckBox(fieldii, menu)
+            aii=QtWidgets.QWidgetAction(menu)
             if fieldii in search_fields:
                 cbii.setChecked(True)
-            aii=QtWidgets.QWidgetAction(menu)
+            if fieldii=='PDF':
+                # keep a reference
+                self.pdf_search_action=aii
+                self.pdf_search_checkbox=cbii
+                if not has_pdf:
+                    cbii.setChecked(False)
+                    aii.setEnabled(False)
             cbii.stateChanged.connect(aii.trigger)
             aii.setDefaultWidget(cbii)
             aii.setText(fieldii)
@@ -362,7 +384,8 @@ class MainFrame(QtWidgets.QWidget,_MainFrameLoadData.MainFrameLoadData,
         aii.setText('Include sub-folders')
         menu.addAction(aii)
 
-        button.setIcon(QIcon.fromTheme('edit-find'))
+        button.setIcon(QIcon.fromTheme('edit-find',
+            self.style().standardIcon(QStyle.SP_FileDialogContentsView)))
         button.setMenu(menu)
         button.setPopupMode(QtWidgets.QToolButton.MenuButtonPopup)
         button.clicked.connect(self.searchBarClicked)
@@ -443,6 +466,8 @@ class MainFrame(QtWidgets.QWidget,_MainFrameLoadData.MainFrameLoadData,
         frame.del_doc_from_lib_signal.connect(self.delDoc)
         frame.clear_duplicate_button.clicked.connect(
                 self.clearDuplicateButtonClicked)
+        frame.merge_frame.add_new_doc_sig.connect(self.addDocFromDuplicateMerge)
+        frame.merge_frame.del_doc_sig.connect(self.delDoc)
         frame.setVisible(False)
 
         return frame
@@ -543,6 +568,9 @@ class MainFrame(QtWidgets.QWidget,_MainFrameLoadData.MainFrameLoadData,
         tv.setStyleSheet('''alternate-background-color: rgb(230,230,249);
                 background-color: none''')
 
+        # add a short cut for pdf preview
+        QtWidgets.QShortcut(Qt.Key_Space, tv, activated=self.openPDFViewer)
+
         return tv
 
 
@@ -567,6 +595,7 @@ class MainFrame(QtWidgets.QWidget,_MainFrameLoadData.MainFrameLoadData,
         self.t_notes=self.createNoteTab()
         self.t_bib=self.createBiBTab()
         self.t_scratchpad=self.createScratchTab()
+        self.t_pdf=self.createPDFTab()
         self.t_meta=MetaTabScroll(self.settings,self)
         self.t_meta.meta_edited.connect(lambda field_list: self.updateTableData(\
             self._current_doc,self.t_meta._meta_dict,field_list))
@@ -576,7 +605,8 @@ class MainFrame(QtWidgets.QWidget,_MainFrameLoadData.MainFrameLoadData,
         self.tab_dict={'Toggle Meta Tab': [self.t_meta, 'Meta Data'],
                 'Toggle Notes Tab': [self.t_notes, 'Notes'],
                 'Toggle BibTex Tab': [self.t_bib, 'BibTex'],
-                'Toggle Scratch Pad Tab': [self.t_scratchpad, 'Scratch Pad']
+                'Toggle Scratch Pad Tab': [self.t_scratchpad, 'Scratch Pad'],
+                'Toggle PDF Tab': [self.t_pdf, 'PDF preview']
                 }
 
         show_widgets=self.settings.value('view/show_widgets',[],str)
@@ -591,6 +621,8 @@ class MainFrame(QtWidgets.QWidget,_MainFrameLoadData.MainFrameLoadData,
         for tii in list(set(self.tab_dict.keys()).difference(show_widgets)):
             self.tab_dict[tii][0].setVisible(False)
 
+        tabs.currentChanged.connect(self.currentTabChange)
+
         return tabs
 
 
@@ -601,9 +633,42 @@ class MainFrame(QtWidgets.QWidget,_MainFrameLoadData.MainFrameLoadData,
         frame=QtWidgets.QFrame()
         v_layout=QtWidgets.QVBoxLayout()
 
+        button=QtWidgets.QToolButton(self)
+        button.setToolButtonStyle(Qt.ToolButtonTextBesideIcon)
+        button.setText('Open Editor')
+
+        menu=QtWidgets.QMenu()
+        self.open_editor_action=menu.addAction('Open Editor')
+        self.choose_editor_action=menu.addAction('Choose Editor')
+        button.setDefaultAction(self.open_editor_action)
+
+        button.setIcon(QIcon.fromTheme('insert-text',
+            self.style().standardIcon(QStyle.SP_FileDialogNewFolder)))
+        button.setMenu(menu)
+        button.setPopupMode(QtWidgets.QToolButton.MenuButtonPopup)
+
+        self.zim_tip_label=QtWidgets.QLabel()
+        tip_icon=QIcon.fromTheme('help-about',
+            self.style().standardIcon(QStyle.SP_MessageBoxInformation)).pixmap(
+                    QSize(16,16))
+        self.zim_tip_label.setPixmap(tip_icon)
+        self.zim_tip_label.setToolTip('''Currently use zim as default note source. Change this in "Tools->Create Zim Notebook->Update from Zim Notes".''')
+
+        if self.settings.value('saving/use_zim_default', type=bool):
+            self.zim_tip_label.setVisible(True)
+        else:
+            self.zim_tip_label.setVisible(False)
+
+        menu.triggered.connect(self.openEditorTriggered)
+        ha=QtWidgets.QHBoxLayout()
+        ha.addWidget(button, 1, Qt.AlignLeft)
+        ha.addWidget(self.zim_tip_label)
+        v_layout.addLayout(ha)
+
         self.note_textedit=NoteTextEdit(self.settings)
-        self.note_textedit.note_edited_signal.connect(lambda: self.updateNotes(
-            self._current_doc,self.note_textedit.toPlainText()))
+        self.note_textedit.note_edited_signal.connect(lambda x:\
+                self.updateNotes(self._current_doc,
+                    self.note_textedit.toPlainText(), x))
 
         v_layout.addWidget(self.note_textedit)
         frame.setLayout(v_layout)
@@ -631,6 +696,21 @@ class MainFrame(QtWidgets.QWidget,_MainFrameLoadData.MainFrameLoadData,
         return scroll
 
 
+    def createPDFTab(self):
+
+        scroll=QtWidgets.QScrollArea(self)
+        scroll.setWidgetResizable(True)
+        frame=QtWidgets.QFrame()
+        v_layout=QtWidgets.QVBoxLayout()
+        self.pdf_viewer=PDFPreviewer(self)
+        v_layout.addWidget(self.pdf_viewer)
+        frame.setLayout(v_layout)
+        scroll.setWidget(frame)
+
+        return scroll
+
+
+
     def createBiBTab(self):
 
         frame=QtWidgets.QWidget()
@@ -641,7 +721,8 @@ class MainFrame(QtWidgets.QWidget,_MainFrameLoadData.MainFrameLoadData,
 
         self.copy_bib_button=QtWidgets.QToolButton(self)
         self.copy_bib_button.setText('Copy')
-        self.copy_bib_button.setIcon(QIcon.fromTheme('edit-copy'))
+        self.copy_bib_button.setIcon(QIcon.fromTheme('edit-copy',
+                self.style().standardIcon(QStyle.SP_FileDialogDetailedView)))
         self.copy_bib_button.setToolButtonStyle(Qt.ToolButtonTextBesideIcon)
 
         h_layout=QtWidgets.QHBoxLayout()

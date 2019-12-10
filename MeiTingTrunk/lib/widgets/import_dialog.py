@@ -17,12 +17,14 @@ import shutil
 import logging
 from PyQt5 import QtWidgets
 from PyQt5.QtCore import Qt, pyqtSignal, pyqtSlot, QSize
-from PyQt5.QtGui import QFont
+from PyQt5.QtGui import QFont, QPixmap
 from PyQt5.QtWidgets import QDialogButtonBox, QStyle
-from ..tools import getHLine
+from ..tools import getHLine, isXapianReady
 from .threadrun_dialog import ThreadRunDialog
 #from import_mendeley import importMendeley
 from .. import import_mendeley
+if isXapianReady():
+    from .. import xapiandb
 
 LOGGER=logging.getLogger(__name__)
 
@@ -127,8 +129,6 @@ class ResultDialog(QtWidgets.QDialog):
 
     def accept(self):
         if self.open_lib_checkbox.isChecked():
-            print('# <accept>: open lib')
-            #self.open_lib_signal.emit()
             super(self.__class__, self).accept()
         else:
             super(self.__class__, self).reject()
@@ -219,10 +219,13 @@ class ImportDialog(QtWidgets.QDialog):
             self.content_vlayout.removeWidget(self.content_frame)
 
         if item_text=='Import From Mendeley':
+            self.import_button.setEnabled(True)
             self.content_frame=self.loadImportMendeley()
         elif item_text=='Import From Zotero':
+            self.import_button.setEnabled(False)
             self.content_frame=self.loadImportZotero()
         elif item_text=='Import From EndNote':
+            self.import_button.setEnabled(False)
             self.content_frame=self.loadImportEndNote()
 
         self.content_vlayout.insertWidget(0,self.content_frame)
@@ -288,6 +291,8 @@ class ImportDialog(QtWidgets.QDialog):
         '''
         #-----------------New sqlite file-----------------
         label=QtWidgets.QLabel('Name your library')
+        label.setStyleSheet(self.label_color)
+        label.setFont(self.title_label_font)
         va.addWidget(label)
 
         self.lib_name_le=QtWidgets.QLineEdit()
@@ -303,13 +308,18 @@ class ImportDialog(QtWidgets.QDialog):
         va.addWidget(getHLine())
 
         #-----------------Sqlite file sel-----------------
-        label=QtWidgets.QLabel('''Select the sqlite database file <br/>
-        Default location: <br/>
+        label=QtWidgets.QLabel('Select the sqlite database file')
+        label.setStyleSheet(self.label_color)
+        label.setFont(self.title_label_font)
+        va.addWidget(label)
+
+        label=QtWidgets.QLabel('''Default location: <br/>
         <br/>
         * Linux: ~/.local/share/data/Mendeley Ltd./Mendeley Desktop/<your_email@www.mendeley.com.sqlite. <br/>
         '''
         )
         label.setTextFormat(Qt.RichText)
+        label.setWordWrap(True)
         va.addWidget(label)
 
         self.mendeley_file_le=QtWidgets.QLineEdit()
@@ -324,6 +334,29 @@ class ImportDialog(QtWidgets.QDialog):
 
         va.addLayout(ha)
 
+        """
+        #-------------------Xapian indexing-------------------
+        va.addWidget(getHLine())
+        label=QtWidgets.QLabel('PDF indexing')
+        label.setStyleSheet(self.label_color)
+        label.setFont(self.title_label_font)
+        self.xapian_index_checkbox=QtWidgets.QCheckBox('Index PDF files?')
+        va.addWidget(label)
+        va.addWidget(self.xapian_index_checkbox)
+
+        if isXapianReady():
+            label=QtWidgets.QLabel('Indexing allows full text search in attached PDFs, but would slow down the import process. You can choose to index at a later stage.')
+            label.setWordWrap(True)
+        else:
+            self.xapian_index_checkbox.setEnabled(False)
+            label=QtWidgets.QLabel('''Xapian is not installed. Please refer to <a href="https://xapian.org/docs/install.html"> https://xapian.org/docs/install.html </a> for installation details.''')
+            label.setTextFormat(Qt.RichText)
+            label.setWordWrap(True)
+            label.setTextInteractionFlags(Qt.TextBrowserInteraction)
+            label.setOpenExternalLinks(True)
+        va.addWidget(label)
+        """
+
         #----------------------Notice----------------------
         va.addWidget(getHLine())
         va.addStretch()
@@ -331,6 +364,7 @@ class ImportDialog(QtWidgets.QDialog):
         label=QtWidgets.QLabel('''Notice: Import will try to export the annotations (highlights, notes) you made in the Mendeley library. <br/>
                 "Cananical" documents (those don't belong to any folder) will be put to the "Default" folder.''')
         label.setTextFormat(Qt.RichText)
+        label.setWordWrap(True)
         va.addWidget(label)
 
 
@@ -389,8 +423,170 @@ class ImportDialog(QtWidgets.QDialog):
     def loadImportEndNote(self):
         '''Load EndNote import category page'''
 
-        scroll,va=self.createFrame('Import From EndNote')
+        scroll,va=self.createFrame('Instructions on how to import from EndNote')
         self.current_task='endnote'
+
+        bs_tag='<span style="font:bold;">'
+        be_tag='</span>'
+
+        label1=QtWidgets.QLabel('''
+        <p>
+        To import data from EndNote, the first step is exporting your library
+        from EndNote to a format understood by MMT.
+        The recommended format is %sRIS%s.
+        </p>
+
+        <ol>
+            <li>
+            To do the export, go to %sFiles -> Export%s.
+            In %sOutput Style%s, select %sRefMan (RIS) Export%s.
+            See Figure 1 below.
+            If that option is not shown, click %sSelect Another Style%s, then search
+            for %sRIS%s, see Figure 2 below.
+            </li>
+
+            <li>
+            Then save the export to a .txt file. You can optionally rename it so
+            it has a '.ris' extension.
+            </li>
+
+            <li>
+            Then in MeiTingTrunk, create a folder to store the new documents,
+            then click the down-arrow next to the %sAdd%s button, select
+            %sAdd RIS File%s. Select the exported .ris file (if you have changed
+            the extension to .ris, otherwise, select All Files to make the .txt file
+            selectable).
+            </li>
+
+            <li>
+            If everything works correctly, the documents in your EndNote should now
+            appear. You can verify the attachment PDFs by doulbe clicking on one
+            of them with attachments.
+            </li>
+        </ol>
+        ''' %(
+            bs_tag, be_tag,
+            bs_tag, be_tag,
+            bs_tag, be_tag,
+            bs_tag, be_tag,
+            bs_tag, be_tag,
+            bs_tag, be_tag,
+            bs_tag, be_tag,
+            bs_tag, be_tag
+        ))
+        label1.setTextFormat(Qt.RichText)
+        label1.setWordWrap(True)
+        va.addWidget(label1)
+
+        fig1_label=QtWidgets.QLabel()
+        fig1_label.resize(600,600)
+        fig1=QPixmap(':/en_import_1.png')
+        fig1_label.setPixmap(fig1.scaled(fig1_label.size()))
+        fig1_label.setStyleSheet('border: 2px solid;')
+        va.addWidget(fig1_label)
+        va.addWidget(QtWidgets.QLabel('Figure 1'), 0, Qt.AlignHCenter)
+
+        fig2_label=QtWidgets.QLabel()
+        fig2_label.resize(600,600)
+        fig2=QPixmap(':/en_import_2.png')
+        fig2_label.setPixmap(fig2.scaled(fig2_label.size()))
+        fig2_label.setStyleSheet('border: 2px solid;')
+        va.addWidget(fig2_label)
+        va.addWidget(QtWidgets.QLabel('Figure 2'), 0, Qt.AlignHCenter)
+
+        va.addWidget(getHLine())
+
+        label4=QtWidgets.QLabel('Linking attachments')
+        label4.setStyleSheet(self.label_color)
+        label4.setFont(self.title_label_font)
+        va.addWidget(label4)
+
+        label2=QtWidgets.QLabel('''
+        <p>
+        If your documents have PDF attachments, you need to modify the exported ris
+        file as such:
+        </p>
+
+        <ol>
+            <li>
+            <p>
+            Open it in a text editor, and search for the string %s"internal-pdf://"%s.
+            This is the scheme used by EndNote to link to files. You will need to
+            replace all occurrences of %s"internal-pdf://"%s with the %sabsolute path%s
+            of the folder containing the %sPDF%s folder. This %sPDF%s folder can
+            be found in the EndNote data folder.
+            </P
+
+            <p>
+            For instance, the EndNote data folder is located at
+            %s/Users/user_name/Documents/My EndNote Library.Data%s. Then the %sPDF%s folder is
+            %s/Users/user_name/Documents/My EndNote Library.Data/PDF/%s.
+            </p>
+            </li>
+
+            <li>
+            In the editor, do a global search/replace, to replace all %sinternal-pdf://%s
+            with
+            %s/Users/user_name/Documents/My EndNote Library.Data/PDF/%s.
+            </li>
+
+            <li>
+            You will have to repeat this to re-build your EndNote library
+            structure, though.
+            </li>
+        </ol>
+        ''' %(
+            bs_tag, be_tag,
+            bs_tag, be_tag,
+            bs_tag, be_tag,
+            bs_tag, be_tag,
+            bs_tag, be_tag,
+            bs_tag, be_tag,
+            bs_tag, be_tag,
+            bs_tag, be_tag,
+            bs_tag, be_tag,
+            bs_tag, be_tag
+        ))
+
+        label2.setTextFormat(Qt.RichText)
+        label2.setWordWrap(True)
+        va.addWidget(label2)
+
+        label5=QtWidgets.QLabel('Notes')
+        label5.setStyleSheet(self.label_color)
+        label5.setFont(self.title_label_font)
+        va.addWidget(label5)
+
+        label3=QtWidgets.QLabel('''
+        <ul>
+            <li>
+            %sNOTE%s: if your %sPDF%s folder path contains spaces, like the example
+            shown above, my experience is there is no need to escape them like this
+            %s/Users/user_name/Documents/My\ EndNote\ Library.Data/PDF%s.
+            But if your attachments can't not be found inside MTT, try escaping
+            them and see if that works.
+            </li>
+
+            <li>
+            %sNOTE 2:%s The RIS format has specific requirements on the tag format.
+            In particular, the "end of record tag" %s"ER  - \n"%s requires a trailing
+            space before the new line character. If your text editor (like mine)
+            is configured to auto-remove trailing whitespaces, this will
+            make the RIS import fail. So be sure to toggle that feature off
+            when you are editting the RIS file.
+            </li>
+        </ul>
+        ''' %(
+            bs_tag, be_tag,
+            bs_tag, be_tag,
+            bs_tag, be_tag,
+            bs_tag, be_tag,
+            bs_tag, be_tag
+        ))
+        label3.setTextFormat(Qt.RichText)
+        label3.setWordWrap(True)
+        va.addWidget(label3)
+
 
         return scroll
 
@@ -451,16 +647,6 @@ class ImportDialog(QtWidgets.QDialog):
         LOGGER.debug('file_out_name = %s' %file_out_name)
         LOGGER.debug('Launching thread...')
 
-        '''
-        self.master1=Master(import_mendeley.importMendeleyPreprocess,
-                [(0, file_in_name, file_out_name)],
-                1, self.parent.main_frame.progressbar,
-                'busy', self.parent.main_frame.status_bar,
-                'Connecting databases...')
-
-        self.master1.all_done_signal.connect(self.doMendeleyImport2)
-        self.master1.run()
-        '''
         #------------------Run in thread------------------
         self.thread_run_dialog1=ThreadRunDialog(
                 import_mendeley.importMendeleyPreprocess,
@@ -512,6 +698,12 @@ class ImportDialog(QtWidgets.QDialog):
 
             return
 
+        """
+        #------------Get xapian indexing choice------------
+        do_indexing=self.xapian_index_checkbox.isChecked()
+        LOGGER.debug('do_indexing = %s' %do_indexing)
+        """
+
         rename_files=self.settings.value('saving/rename_files', 1)
         LOGGER.debug('rename_files = %s' %rename_files)
 
@@ -519,26 +711,47 @@ class ImportDialog(QtWidgets.QDialog):
         self.job_list=[]
         for ii, docii in enumerate(docids):
             self.job_list.append((ii, dbin, dbout, lib_name, lib_folder,
-                rename_files, ii, docii))
+                rename_files, ii, docii, False))
 
         # this last job signals a sqlite commit
         self.job_list.append((-1, dbin, dbout, lib_name, lib_folder,
-            rename_files, ii, None))
+            rename_files, ii, None, False))
+
+        if isXapianReady():
+            def doXapian(results, xapian_folder, lib_folder):
+                xapiandb.indexFolder(xapian_folder, lib_folder)
+                return results
+
+            xapian_folder=os.path.join(lib_folder,'_xapian_db')
+            post_process_func=doXapian
+            post_process_func_args=(xapian_folder, lib_folder)
+            post_process_progress=1
+            show_message='Transfering data and indexing attachment files...'
+            LOGGER.info('Do xapian indexing')
+        else:
+            post_process_func=None
+            post_process_func_args=()
+            post_process_progress=1
+            show_message='Transfering data...'
 
         #------------------Run in thread------------------
         self.thread_run_dialog2=ThreadRunDialog(
                 import_mendeley.importMendeleyCopyData,
                 self.job_list,
-                show_message='Transfering data...',
+                show_message=show_message,
                 max_threads=1,
                 get_results=False,
                 close_on_finish=False,
                 progressbar_style='classic',
-                post_process_func=None,
+                post_process_func=post_process_func,
+                post_process_func_args=post_process_func_args,
+                post_process_progress=post_process_progress,
                 parent=self)
 
         self.thread_run_dialog2.master.all_done_signal.connect(
                 lambda: self.postImport(file_out_name))
+        self.thread_run_dialog2.abort_job_signal.connect(lambda: self.delFail(
+            (file_out_name, lib_folder, xapian_folder)))
         self.thread_run_dialog2.exec_()
 
         return
@@ -561,6 +774,7 @@ class ImportDialog(QtWidgets.QDialog):
         if rec==0:
             fail_list=[]
             pdf_fail_list=[]
+            xapian_fail_list=[]
 
             for recii, jobii, fail_fileii in step2_results[:-1]:
                 if recii==1:
@@ -573,34 +787,64 @@ class ImportDialog(QtWidgets.QDialog):
                     LOGGER.warning('Failed to export annotated pdf(s) %s'\
                             %fail_fileii)
                     pdf_fail_list.append(entryii)
+                elif recii==3:
+                    entryii='* PDF file(s) = %s' %fail_fileii
+                    LOGGER.warning('Failed to index pdf(s) %s'\
+                            %fail_fileii)
+                    xapian_fail_list.append(entryii)
+                elif recii==4:
+                    pdf_fail, xapian_fail=fail_fileii.split('\n')
+                    entryii='* PDF file(s) = %s' %pdf_fail
+                    LOGGER.warning('Failed to export annotated pdf(s) %s'\
+                            %pdf_fail)
+                    pdf_fail_list.append(entryii)
+
+                    entryii='* PDF file(s) = %s' %xapian_fail
+                    LOGGER.warning('Failed to index pdf(s) %s'\
+                            %xapian_fail)
+                    xapian_fail_list.append(entryii)
 
             #-----------------Show failed jobs-----------------
-            if len(fail_list)>0 or len(pdf_fail_list)>0:
+            if len(fail_list)>0 or len(pdf_fail_list)>0 or\
+                    len(xapian_fail_list)>0:
 
                 msg=ResultDialog()
                 msg.setText('Errors encountered.')
+                info_text=[]
+                fail_str=''
 
-                # only doc transfer failures
-                if len(fail_list)>0 and len(pdf_fail_list)==0:
-                    msg.setInformativeText('Failed to import some documents.')
-                    fail_str='\n'.join(fail_list)
-                    msg.setDetailedText(fail_str)
+                if len(fail_list)>0:
+                    info_text.append('Failed to import some documents.')
+                    fail_str+='''
 
-                # only pdf annotation export failures
-                elif len(fail_list)==0 and len(pdf_fail_list)>0:
-                    msg.setInformativeText('Failed to export annotations in some PDFs.')
-                    fail_str='\n'.join(pdf_fail_list)
-                    msg.setDetailedText(fail_str)
+###############################
+Failed documents:
+###############################
+'''
+                    fail_str+='\n'.join(fail_list)
 
-                # both doc transfer and pdf annotation export failures
-                elif len(fail_list)>0 and len(pdf_fail_list)>0:
-                    msg.setInformativeText('''
-                    Failed to import some documents. <br/>
-                    Failed to export annotations in some PDFs.''')
-                    fail_str1='\n'.join(fail_list)
-                    fail_str2='\n'.join(pdf_fail_list)
-                    msg.setDetailedText('Failed documents:\n%s\n\nFailed PDFs:\n%s'\
-                            %(fail_str1, fail_str2))
+                if len(pdf_fail_list)>0:
+                    info_text.append('Failed to export annotations in some PDFs.')
+                    fail_str+='''
+
+###############################
+Failed PDF annotation export:
+###############################
+'''
+                    fail_str+='\n'.join(pdf_fail_list)
+
+                if len(xapian_fail_list)>0:
+                    info_text.append('Failed to index some PDFs.')
+                    fail_str+='''
+
+###############################
+Failed PDF indexing:
+###############################
+'''
+                    fail_str+='\n'.join(xapian_fail_list)
+
+                msg.setInformativeText('\n'.join(info_text))
+                msg.setDetailedText(fail_str)
 
                 choice=msg.exec_()
 
@@ -637,13 +881,9 @@ class ImportDialog(QtWidgets.QDialog):
             dirname,fname=os.path.split(file_name)
             lib_folder=os.path.join(dirname,os.path.splitext(fname)[0])
 
-            #----------------Remove sqlite file----------------
-            if os.path.exists(file_name):
-                os.remove(file_name)
-                LOGGER.info('Remove sqlite database file %s' %file_name)
-            if os.path.exists(lib_folder):
-                shutil.rmtree(lib_folder)
-                LOGGER.info('Remove lib folder %s' %lib_folder)
+            #----------------Remove file----------------
+            xapian_folder=os.path.join(lib_folder,'_xapian_db')
+            self.delFail((file_name, lib_folder, xapian_folder))
 
             self.thread_run_dialog2.accept()
 
@@ -651,6 +891,19 @@ class ImportDialog(QtWidgets.QDialog):
 
         return
 
+
+    @pyqtSlot(tuple)
+    def delFail(self, files):
+        for fii in files:
+            if os.path.exists(fii):
+                if os.path.isdir(fii):
+                    shutil.rmtree(fii)
+                    LOGGER.info('Remove folder %s' %fii)
+                else:
+                    os.remove(fii)
+                    LOGGER.info('Remove file %s' %fii)
+
+        return
 
 
     def popUpGiveName(self):

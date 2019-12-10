@@ -15,12 +15,14 @@ You may use, distribute and modify this code under the
 terms of the GPLv3 license.
 '''
 
+import os
 from datetime import datetime
 from PyQt5.QtCore import Qt, pyqtSignal, pyqtSlot
 from PyQt5.QtGui import QBrush
 from PyQt5 import QtWidgets
 from .lib import sqlitedb
 from .lib import widgets
+from .lib.widgets.zim_dialog import saveToZimNote
 
 
 
@@ -89,11 +91,18 @@ class MainFrameDataSlots:
 
             # update meta_dict
             self.meta_dict[docid]=meta_dict
+            meta_dict['id']=docid
             # add to needs review folder
             self.folder_data['-2'].append(docid)
             # scroll to and select row in doc table
             self.doc_table.scrollToBottom()
-            self.loadDocTable(docids=self._current_docids+[docid,],sel_row=None)
+            self.loadDocTable(docids=self._current_docids+[docid,],
+                    sel_row=None, sortidx=False)
+
+            # use sortidx=False to signal don't do sorting. This is
+            # for adding new docs to the folder and I want the new docs to
+            # appear at the end, so scrolling to and selecting them is easier,
+            # and makes sense.
 
             #xx=self.doc_table.model().rowCount(None)
             # NOTE that the below method may not work when table was empty before
@@ -119,7 +128,8 @@ class MainFrameDataSlots:
 
             # reload doc table
             self.loadDocTable(docids=self._current_docids,
-                    sel_row=self.doc_table.currentIndex().row())
+                    sel_row=self.doc_table.currentIndex().row(),
+                    sortidx=False)
 
         self.changed_doc_ids.append(docid)
 
@@ -142,18 +152,21 @@ class MainFrameDataSlots:
             self.meta_dict[docid]=meta_dict
             self.changed_doc_ids.append(docid)
             self.loadDocTable(docids=self._current_docids,
+                    sortidx=False,
                     sel_row=self.doc_table.currentIndex().row())
 
         return
 
 
-    @pyqtSlot()
-    def updateNotes(self, docid, note_text):
+    @pyqtSlot(bool)
+    def updateNotes(self, docid, note_text, save_to_zim):
         """update notes in the in-memory dictionary
 
-        args:
+        Args:
             docid (int): id of doc to update.
             note_text (str): new note texts.
+            save_to_zim (bool): if True and use_zim_default==True, save note
+                                to associated zim file.
         """
 
         if docid is None:
@@ -162,6 +175,18 @@ class MainFrameDataSlots:
         self.meta_dict[docid]['notes']=note_text
         self.changed_doc_ids.append(docid)
         self.logger.info('New notes for docid=%s: %s' %(docid,note_text))
+
+        use_zim_default=self.settings.value('saving/use_zim_default', type=bool)
+
+        #######################################################################
+        #                       Disable use_zim_default                       #
+        use_zim_default=False
+        #######################################################################
+
+        if use_zim_default and save_to_zim:
+            self.logger.debug('Call saveToZimNote on update of doc %s' %docid)
+            saveToZimNote(self._zim_folder, self.meta_dict, self._current_doc,
+                    overwrite=True)
 
         return
 
@@ -205,7 +230,8 @@ class MainFrameDataSlots:
             # remove doc from current folder when restoring
             if docid in self.folder_data[current_folderid]:
                 self.folder_data[current_folderid].remove(docid)
-                self.loadDocTable(folder=self._current_folder,sel_row=None,sortidx=4)
+                self.loadDocTable(folder=self._current_folder,
+                        sel_row=None,sortidx=None)
 
         # add highlight to folder
         hi_color=self.settings.value('display/folder/highlight_color_br',
@@ -257,19 +283,23 @@ class MainFrameDataSlots:
 
             sqlitedb.saveFoldersToDatabase(self.db,
                     self.changed_folder_ids, self.folder_dict,
-                    self.folder_data,
                     self.settings.value('saving/current_lib_folder'))
 
             self.changed_folder_ids=[]
             self.logger.info('Folder changes saved to database.')
 
         #--------------------Save docs--------------------
+        any_reload_doc=False
         for docid in self.changed_doc_ids:
             self.logger.info('Saving doc %s' %docid)
-            sqlitedb.metaDictToDatabase(self.db,docid,
+            rec, reload_doc=sqlitedb.metaDictToDatabase(self.db, docid,
+                    self.meta_dict,
                     self.meta_dict.get(docid),
                     self.settings.value('saving/current_lib_folder'),
-                    self.settings.value('saving/rename_files'))
+                    self.settings.value('saving/rename_files', type=int),
+                    self.settings.value('saving/file_move_manner', type=str)
+                    )
+            any_reload_doc=any_reload_doc or reload_doc
 
         self.changed_doc_ids=[]
         self.settings.sync()
@@ -277,6 +307,16 @@ class MainFrameDataSlots:
         self.progressbar.setVisible(False)
 
         self.logger.info('Saving completed.')
+
+        #current_folder=self._current_folder
+        current_doc_ids=self._current_docids
+        #if any_reload_doc and current_folder is not None:
+        if any_reload_doc and current_doc_ids:
+            current_row=self.doc_table.currentIndex().row()
+            self.logger.debug('Reloading doc table after save. current_row = %s' %(current_row))
+            self.loadDocTable(docids=current_doc_ids, sortidx=False,
+                    sel_row=current_row)
+
 
         return
 
@@ -300,5 +340,38 @@ class MainFrameDataSlots:
 
 
 
+    @pyqtSlot(sqlitedb.DocMeta)
+    def addDocFromDuplicateMerge(self, meta_dict):
+
+        docid=max(self.meta_dict.keys())+1
+        self.logger.info('Add new doc. Given id=%s' %docid)
+
+        # update folder_data
+        folders=meta_dict['folders_l']
+        for folderid, foldername in folders:
+            self.folder_data[folderid].append(docid)
+
+        # add to needs review folder
+        self.folder_data['-2'].append(docid)
+
+        # update meta_dict
+        self.meta_dict[docid]=meta_dict
+
+        self.changed_doc_ids.append(docid)
+
+        msg=QtWidgets.QMessageBox()
+        msg.resize(600,500)
+        msg.setIcon(QtWidgets.QMessageBox.Information)
+        msg.setWindowTitle('Merge completed')
+        msg.setText('                New document created.                  ')
+        msg.setInformativeText('''
+        New document has been created from duplicate merge, <br/>
+        and added to folder(s): <br/>
+        <br/>
+            <span style="font: bold;"> %s </span>
+        ''' %(', '.join([fii[1] for fii in folders])))
+        msg.exec_()
+
+        return
 
 

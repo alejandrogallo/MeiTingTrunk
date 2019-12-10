@@ -17,7 +17,9 @@ import os
 import re
 import time
 import platform
+import glob
 import logging
+import subprocess
 from functools import reduce
 from fuzzywuzzy import fuzz
 from PyQt5 import QtWidgets
@@ -192,8 +194,8 @@ def parseAuthors(authorlist):
     lastnames=[]
     for nii in authorlist:
         nii=nii.split(',',1)
-        lastnames.append(nii[0] if len(nii)>1 else nii[0])
-        firstnames.append(nii[1] if len(nii)>1 else '')
+        lastnames.append(nii[0].strip() if len(nii)>1 else nii[0])
+        firstnames.append(nii[1].strip() if len(nii)>1 else '')
     #authors=sqlitedb.zipAuthors(firstnames,lastnames)
 
     return firstnames,lastnames,authorlist
@@ -217,15 +219,41 @@ def removeInvalidPathChar(path):
     return path
 
 
-def fuzzyMatch(jobid, id1, id2, dict1, dict2):
+def fuzzyMatchPrepare(docid, meta_dict):
+    """Get meta data in a document and prepare strings for fuzzy matching
+
+    Args:
+        docid (int): doc id.
+        meta_dict (DocMeta): meta data dict of doc.
+
+    Returns:
+        docid (int): doc id.
+        authors1 (str): author list string.
+        title1 (str): title.
+        jy1 (str): journal+year string.
+    """
+
+    authors1=meta_dict['authors_l'] or ''
+    authors1=', '.join(authors1)
+
+    title1=meta_dict['title'] or ''
+
+    journal1=meta_dict['publication'] or ''
+    year1=meta_dict['year'] or ''
+
+    jy1='%s %s' %(journal1, year1)
+
+    return docid, authors1, title1, jy1
+
+
+def fuzzyMatch(jobid, doc1_list, doc2_list, min_score):
     """Compute similarity score between 2 docs using fuzzy matching
 
     Args:
         jobid (int): job id.
-        id1 (int): id of doc 1.
-        id2 (int): id of doc 2.
-        dict1 (DocMeta): meta data dict of doc 1.
-        dict2 (DocMeta): meta data dict of doc 2.
+        doc1_list (list): strings to compare in doc 1.
+        doc2_list (list): strings to compare in doc 2.
+        min_score (int): minimum score to flag a match.
 
     Returns:
         rec (int): 0 for success.
@@ -235,39 +263,43 @@ def fuzzyMatch(jobid, id1, id2, dict1, dict2):
 
     """
 
-    authors1=dict1['authors_l'] or ''
-    authors2=dict2['authors_l'] or ''
-    authors1=', '.join(authors1)
-    authors2=', '.join(authors2)
+    id1, authors1, title1, jy1 = doc1_list
+    id2, authors2, title2, jy2 = doc2_list
 
-    title1=dict1['title'] or ''
-    title2=dict2['title'] or ''
+    len_authors=(len(authors1)+len(authors2))//2
+    len_title=(len(title1)+len(title2))//2
+    len_other=(len(jy1)+len(jy2))//2
+    A=min_score*(len_authors+len_title+len_other)
 
-    journal1=dict1['publication'] or ''
-    journal2=dict2['publication'] or ''
-    year1=dict1['year'] or ''
-    year2=dict2['year'] or ''
+    ratio_authors=fuzz.ratio(authors1, authors2)
 
-    jy1='%s %s' %(journal1, year1)
-    jy2='%s %s' %(journal2, year2)
+    # a short cut for authors score
+    if len_authors>0:
+        min_ratio_authors=A/len_authors - 100*(len_title+len_other)/len_authors
+        if ratio_authors<min_ratio_authors:
+            return 0,jobid, ((id1,id2), 0)
 
-    ratio_authors=fuzz.token_sort_ratio(authors1, authors2)
     ratio_title=fuzz.ratio(title1, title2)
+
+    # a short cut for authors score
+    if len_title>0:
+        min_ratio_title=A/len_title - (ratio_authors*len_authors+100*len_other)/len_title
+        if ratio_title<min_ratio_title:
+            return 0,jobid, ((id1,id2), 0)
+
     ratio_other=fuzz.ratio(jy1, jy2)
 
-    len_authors=0.5*(len(authors1)+len(authors2))
-    len_title=0.5*(len(title1)+len(title2))
-    len_other=0.5*(len(jy1)+len(jy2))
-
-    score=(len_authors*ratio_authors + len_title*ratio_title + len_other*ratio_other)/\
+    score=(len_authors*ratio_authors + len_title*ratio_title + len_other*ratio_other)//\
             (len_authors+len_title+len_other)
 
+    '''
     LOGGER.debug('authors1 = %s, authors2 = %s, score = %d'\
             %(authors1, authors2, ratio_authors))
     LOGGER.debug('title1 = %s, title2 = %s, score = %d'\
             %(title1, title2, ratio_title))
     LOGGER.debug('jy1 = %s, jy2 = %s, score = %d'\
             %(jy1, jy2, ratio_other))
+    '''
 
     return 0,jobid, ((id1,id2), round(score))
 
@@ -466,3 +498,189 @@ def autoRename(abpath):
     return newname
 
 
+def hasBin(bin_name):
+    '''Check the existance of a binary'''
+
+    proc=subprocess.Popen(['which', bin_name], stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE)
+    rec=proc.communicate()
+    if len(rec[0])==0 and len(rec[1])>0:
+        return False
+
+    return True
+
+
+def hasPdftotext():
+    '''Check the existance of pdftotext'''
+
+    return hasBin('pdftotext')
+
+
+def hasXapian():
+    '''Check the existance of xapian core and xapian-python'''
+
+    has_xapian=hasBin('xapian-delve')
+    has_omindex=hasBin('omindex')
+    if not has_xapian or not has_omindex:
+        return False
+
+    try:
+        import xapian
+    except:
+        return False
+
+    return True
+
+
+def isXapianReady():
+
+    return hasPdftotext() and hasXapian()
+
+
+class Cache(object):
+    def __init__(self, func):
+        self.func=func
+        self.store_dict={}
+
+    def get(self, key, args=(), update=False):
+        '''
+        if not update:
+            return self.store_dict.setdefault(key, self.func(*args))
+        else:
+            self.store_dict[key]=self.func(*args)
+            return self.store_dict[key]
+        '''
+        if not update and key in self.store_dict:
+            print('# <get>: get existing for key=',key)
+            return self.store_dict[key]
+
+        print('# <get>: compute new for key=',key)
+        value=self.func(*args)
+        self.store_dict[key]=value
+
+        return value
+
+
+def getSqlitePath(connection):
+    '''Get the database path from connection
+    '''
+
+    return connection.execute('PRAgMA database_list').fetchall()[0][2]
+
+
+def createDelButton(font_height=12):
+    '''Create a circular button with a symbol x
+
+    Kwargs:
+        font_height (int): font height. Determines button size.
+    '''
+
+    button=QtWidgets.QPushButton()
+    button.setFixedWidth(int(font_height))
+    button.setFixedHeight(int(font_height))
+    button.setText('\u2715')
+    button.setStyleSheet('''
+    QPushButton {
+        border: 1px solid rgb(190,190,190);
+        background-color: rgb(190,190,190);
+        border-radius: %dpx;
+        font: bold %dpx;
+        color: white;
+        text-align: center;
+        }
+
+    QPushButton:pressed {
+        border-style: inset;
+        }
+    ''' %(int(font_height/2), max(1,font_height-2))
+    )
+
+    return button
+
+
+def hasImageMagic():
+    '''Check the existance of ImageMagic'''
+
+    return hasBin('convert')
+
+
+def hasPoppler():
+    '''Check the existance of poppler, in particular pdftoppm'''
+
+    return hasBin('pdftoppm')
+
+
+def clearLayout(layout):
+    '''Recursively clear a layout'''
+
+    while layout.count():
+        child = layout.takeAt(0)
+        if child.widget():
+            try:
+                clearLayout(child.widget().layout())
+            except:
+                pass
+            child.widget().deleteLater()
+    return
+
+
+def delThumbnails(lib_folder, filename=None):
+    '''Delete thumbnail files in cache folder
+
+    Args:
+        lib_folder (str): path to library folder.
+    Kwargs:
+        filename (str or None): file name of the pdf file whose thumbnail
+            files will be deleted. If None, del all jpg files in cache
+            folder.
+    '''
+
+    #lib_folder=self.settings.value('saving/current_lib_folder', type=str)
+    cache_folder=os.path.join(lib_folder, '_cache')
+
+    if filename is None:
+        files=glob.glob(os.path.join(cache_folder, '*.jpg'))
+    else:
+        files=glob.glob(os.path.join(cache_folder, '%s*.jpg' %filename))
+
+    for fii in files:
+        os.remove(fii)
+
+    LOGGER.info('filename = %s' %filename)
+    LOGGER.info('thumbnails deleted.')
+
+    return
+
+
+class ZimError(Exception):
+
+    def __init__(self, text=None):
+        if text is not None:
+            self.message=text
+    def __str__(self):
+        return self.message
+
+
+class ZimNoteNotFoundError(ZimError):
+
+    def __init__(self, text=None):
+        if text is not None:
+            self.message=text
+    def __str__(self):
+        return self.message
+
+class ZimNoteLinkNotFoundError(ZimError):
+
+    def __init__(self, text=None):
+        if text is not None:
+            self.message=text
+    def __str__(self):
+        return self.message
+
+class ZimNoteInTrashError(ZimError):
+
+    def __init__(self, text=None):
+        if text is not None:
+            self.message=text
+    def __str__(self):
+        return self.message

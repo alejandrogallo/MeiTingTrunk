@@ -24,6 +24,8 @@ from PyQt5.QtCore import Qt, QTimer
 from . import _MainWindow
 from .version import __version__
 
+
+
 dirname=os.path.split(__file__)[0]
 LOG_CONFIG={
         'version': 1,
@@ -36,9 +38,12 @@ LOG_CONFIG={
         'handlers': {
             'default': {
                 'level': 'DEBUG',
-                'class': 'logging.FileHandler',
+                'class': 'logging.handlers.RotatingFileHandler',
                 'formatter': 'standard',
-                'filename': os.path.join(dirname,'MTT.log')
+                'filename': os.path.join(dirname,'MTT.log'),
+                'mode': 'a',
+                'maxBytes': 10*1024*1024,  # 10 M
+                'backupCount': 1
                 },
             },
         'root' : {
@@ -47,7 +52,6 @@ LOG_CONFIG={
                 'propagate': True
             }
         }
-
 
 
 # TODO:
@@ -80,7 +84,7 @@ LOG_CONFIG={
 # [y] add trash can
 # [y] sqlite text search: https://stackoverflow.com/questions/35020797/how-to-use-full-text-search-in-sqlite3-database-in-django
 # PDF preview
-# add doc strings!!
+# [y] add doc strings!!
 # [partially y] make long actions threaded
 # [y] need to deal with folder changes in sqlite
 # [y] add doc drag drop to folders
@@ -90,7 +94,7 @@ LOG_CONFIG={
 # add option to set autosave and auto backup
 # add some actions to Edit menu
 # [y] disable the add file button when no doc is selected, but not when adding new mannualy
-# sqlite operations is restricted to a single thread.
+# [not quite true] sqlite operations is restricted to a single thread.
 # [y] add open doc folder action to right menu: 'xdg-mime query default inode/directory | sed 's/.desktop//g' -> e.g. nemo
 # [y] auto open last datebase on launch
 # rename file when exporting. Need to deal with switching to renaming after some files have been copied without renaming, or changing renaming pattern.
@@ -121,8 +125,15 @@ LOG_CONFIG={
 # [y] make file paths relative
 # [y] rel v.s. abs file path choices in bib, ris exports
 # [y] del prints
-# add doc table sort idx to settings
+# [y] add doc table sort idx to settings
 # master control on the statusbar, show a diff message after done if not close_on_finish
+# [y] disable save lib, close lib when not loaded
+# add doc adding to Edit or File?
+# [y] use open instead of xdg-open in Mac
+# auto renaming bib, ris files when meta data is empty
+# icons on mac missing
+# [y] drag/drop on mac
+# button style on mac
 
 def main(args=None):
 

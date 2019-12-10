@@ -17,12 +17,12 @@ import os
 import re
 import logging
 from PyQt5 import QtWidgets
-from PyQt5.QtCore import Qt, pyqtSignal, QPoint, pyqtSlot
+from PyQt5.QtCore import Qt, pyqtSignal, QPoint, pyqtSlot, QSize
 from PyQt5.QtGui import QIcon, QFont, QFontMetrics
-from PyQt5.QtWidgets import QDialogButtonBox
+from PyQt5.QtWidgets import QDialogButtonBox, QStyle
 from .. import sqlitedb
 from ..tools import getHLine, getXExpandYMinSizePolicy, parseAuthors,\
-        getXExpandYExpandSizePolicy
+        getXExpandYExpandSizePolicy, createDelButton
 from .. import _crossref
 
 LOGGER=logging.getLogger(__name__)
@@ -211,10 +211,11 @@ class AdjustableTextEditWithFold(AdjustableTextEdit):
 
 
 class FileLineEdit(QtWidgets.QLineEdit):
-    def __init__(self,parent=None):
+    def __init__(self,lib_folder,parent=None):
         '''
         Args:
             parent (QWidget): parent widget.
+            lib_folder (str): abspath to lib_current_folder.
 
         This modified QLineEdit accepts a file path as its text, and displays
         an elided version of the file name part of the path.
@@ -222,8 +223,28 @@ class FileLineEdit(QtWidgets.QLineEdit):
 
         super(FileLineEdit,self).__init__(parent)
         self.fm=QFontMetrics(self.font())
+        self.lib_folder=lib_folder
+        self.parent=parent
+
+        self.type_label=QtWidgets.QLabel()
+        self.file_type_icon=QIcon.fromTheme('emblem-documents',
+            self.style().standardIcon(QStyle.SP_FileIcon)).pixmap(
+                    QSize(16,16))
+        self.link_type_icon=QIcon.fromTheme('emblem-symbolic-link',
+            self.style().standardIcon(QStyle.SP_FileLinkIcon)).pixmap(
+                    QSize(16,16))
+
+        self.editingFinished.connect(self.checkNewValue) # focus out or return
+
 
     def setText(self,text,elide=True):
+        '''Provide textedit with a file path
+
+        Args:
+            text (str): file path, could be abs or rel.
+        Kwargs:
+            elide (bool): make elided text or not.
+        '''
 
         self.full_text=text
         self.short_text=os.path.split(self.full_text)[1]
@@ -232,19 +253,79 @@ class FileLineEdit(QtWidgets.QLineEdit):
         super(FileLineEdit,self).setText(
              self.fm.elidedText(self.short_text,Qt.ElideRight,self.width()-20))
 
+        # get file path
+        if os.path.isabs(text):
+            filepath=text
+        else:
+            filepath=os.path.join(self.lib_folder, text)
+
+        if os.path.islink(filepath):
+            self.type_label.setPixmap(self.link_type_icon)
+            self.type_label.setToolTip('Attachment file is a symbolic link.')
+            LOGGER.debug('file path is a link: %s' %filepath)
+        else:
+            self.type_label.setPixmap(self.file_type_icon)
+            self.type_label.setToolTip('Attachment file is not a symbolic link.')
+            LOGGER.debug('file path is not a link: %s' %filepath)
+
         return
 
 
-    def text(self):
+    #def text(self):
 
-        return self.fm.elidedText(self.short_text,Qt.ElideRight,self.width()-20)
+        #return self.fm.elidedText(self.short_text,Qt.ElideRight,self.width()-20)
 
 
-    def resizeEvent(self,event):
+    def resizeEvent(self, event):
 
         super(QtWidgets.QLineEdit, self).resizeEvent(event)
         if hasattr(self,'full_text'):
             self.setText(self.full_text,elide=True)
+
+
+    def focusInEvent(self, event):
+
+        text=self.full_text
+        if os.path.isabs(text):
+            super(FileLineEdit,self).setText(text)
+        else:
+            super(FileLineEdit,self).setText(os.path.join(self.lib_folder,
+                text))
+
+
+    def checkNewValue(self):
+
+        # compare change
+        old_path=self.full_text
+        new_path=os.path.expanduser(self.text())
+        if not os.path.isabs(old_path):
+            old_path=os.path.join(self.lib_folder,old_path)
+        if not os.path.isabs(new_path):
+            new_path=os.path.join(self.lib_folder,new_path)
+
+        if old_path!=new_path:
+            if not os.path.exists(new_path):
+                LOGGER.debug('Given file not found %s. Revert to previous.'\
+                        %new_path)
+                self.setText(old_path)
+
+                # disconnect to avoid triggering twice
+                self.editingFinished.disconnect()
+                msg=QtWidgets.QMessageBox()
+                msg.resize(500,500)
+                msg.setIcon(QtWidgets.QMessageBox.Warning)
+                msg.setWindowTitle('Error')
+                msg.setText('File not found %s' %(' '*20))
+                msg.setInformativeText('''
+Given file <br/> <span style=font:bold;> %s </span> <br/>is not found.<br/> Revert to previous value.''' %new_path)
+                msg.exec_()
+                # re-connect
+                self.editingFinished.connect(self.checkNewValue)
+
+            else:
+                self.setText(new_path)
+                self.parent.fieldEdited('files_l')
+
 
 
 
@@ -285,6 +366,7 @@ class MetaTabScroll(QtWidgets.QScrollArea):
         title_te=AdjustableTextEdit('title')
         title_te.setFrameStyle(QtWidgets.QFrame.NoFrame)
         title_te.setFont(self.settings.value('display/fonts/meta_title', QFont))
+        title_te.setPlaceholderText('Title')
         self.fields_dict['title']=title_te
         self.v_layout.addWidget(title_te)
 
@@ -323,7 +405,8 @@ class MetaTabScroll(QtWidgets.QScrollArea):
         #--------------Add doi search button--------------
         self.doi_search_button=QtWidgets.QPushButton()
         self.doi_search_button.setFixedSize(30,30)
-        self.doi_search_button.setIcon(QIcon.fromTheme('edit-find'))
+        self.doi_search_button.setIcon(QIcon.fromTheme('edit-find',
+            self.style().standardIcon(QStyle.SP_FileDialogContentsView)))
         self.doi_search_button.setStyleSheet('''
         QPushButton {
             border: 1px solid rgb(190,190,190);
@@ -489,8 +572,9 @@ class MetaTabScroll(QtWidgets.QScrollArea):
 
         h_layout=QtWidgets.QHBoxLayout()
 
-        le=FileLineEdit()
-        le.setReadOnly(True)
+        le=FileLineEdit(self.settings.value('saving/current_lib_folder',
+            type=str), parent=self)
+        #le.setReadOnly(True)
         le.setFont(self.settings.value('display/fonts/%s' %font_name, QFont))
 
         if text is not None:
@@ -502,29 +586,12 @@ class MetaTabScroll(QtWidgets.QScrollArea):
         # create a del file button
         button=QtWidgets.QPushButton()
         font_height=le.fm.height()
-        button.setFixedWidth(int(font_height))
-        button.setFixedHeight(int(font_height))
-        button.setText('\u2715')
-        button.setStyleSheet('''
-        QPushButton {
-            border: 1px solid rgb(190,190,190);
-            background-color: rgb(190,190,190);
-            border-radius: %dpx;
-            font: bold %dpx;
-            color: white;
-            text-align: center;
-            padding-bottom: 2px;
-            }
-
-        QPushButton:pressed {
-            border-style: inset;
-            }
-        ''' %(int(font_height/2), max(1,font_height-2))
-        )
+        button=createDelButton(font_height)
         button.clicked.connect(lambda: self.delFileButtonClicked(
             self.fields_dict['files_l'].index(le)))
 
         le.del_button=button
+        h_layout.addWidget(le.type_label)
         h_layout.addWidget(le)
         h_layout.addWidget(button)
 
@@ -556,9 +623,11 @@ class MetaTabScroll(QtWidgets.QScrollArea):
 
         def delFile(le):
             self.v_layout.removeWidget(le.del_button)
+            self.v_layout.removeWidget(le.type_label)
             self.v_layout.removeWidget(le)
             le.deleteLater()
             le.del_button.deleteLater()
+            le.type_label.deleteLater()
             # NOTE: you can't del a element in list if it is iterating
             #self.fields_dict['files_l'].remove(le)
             # keep a record of the current idx in the vertical layout
@@ -718,7 +787,7 @@ class MetaTabScroll(QtWidgets.QScrollArea):
                             else:
                                 textii=vii.text().strip()
                         elif isinstance(vii,QtWidgets.QTextEdit):
-                            textii=vii.toPlaintext().strip()
+                            textii=vii.toPlainText().strip()
                         if textii:
                             values.append(textii)
                     result_dict[kk]=values
@@ -807,7 +876,7 @@ class MetaDataEntryDialog(QtWidgets.QDialog):
 
 class NoteTextEdit(QtWidgets.QTextEdit):
 
-    note_edited_signal=pyqtSignal()
+    note_edited_signal=pyqtSignal(bool) # save_to_zim, True here
 
     def __init__(self,settings,parent=None):
         '''
@@ -828,7 +897,16 @@ class NoteTextEdit(QtWidgets.QTextEdit):
 
 
     def focusOutEvent(self,event):
-        if self.document().isModified():
-            self.note_edited_signal.emit()
-        super(NoteTextEdit,self).focusOutEvent(event)
+        if hasattr(self, 'editor'):
+            isopen=self.editor._temp_file.isOpen()
+            if not isopen:
+                if self.document().isModified():
+                    self.note_edited_signal.emit(True)
+                LOGGER.debug('External editor file is open = %s. delete.'\
+                        %isopen)
+                self.editor.deleteLater()
+        else:
+            if self.document().isModified():
+                self.note_edited_signal.emit(True)
 
+        super(NoteTextEdit,self).focusOutEvent(event)
